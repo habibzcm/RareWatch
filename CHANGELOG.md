@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.5.2
+- Fixed the "blocked from an action only available to the Blizzard UI" warning on login and /reload (found via the taint log). RareWatch no longer registers for the combat log, which this client blocks, and no longer writes to the game's Esc-close list, which tainted the UI.
+
 ## 0.5.1
 - Fixed the "RareWatch has been blocked from an action only available to the Blizzard UI" warning on login and /reload. RareWatch no longer edits your chat windows; it hides the sync channel's join messages with a chat filter instead.
 

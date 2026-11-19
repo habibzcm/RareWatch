@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.5.1"
+ns.VERSION = "0.5.2"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -1141,7 +1141,9 @@ for _, e in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "N
     "ADDON_ACTION_FORBIDDEN", "ADDON_ACTION_BLOCKED" }) do
     ev:RegisterEvent(e)
 end
-if not pcall(ev.RegisterEvent, ev, "COMBAT_LOG_EVENT_UNFILTERED") then ns.noCombatLog = true end
+-- Not registered: this client blocks addons from the combat log, and the attempt itself
+-- triggers a "blocked from an action" warning. Kills are detected from dead units instead.
+ns.noCombatLog = true
 pcall(ev.RegisterEvent, ev, "UNIT_HEALTH")
 pcall(ev.RegisterEvent, ev, "UNIT_HEALTH_FREQUENT")
 
@@ -1161,7 +1163,6 @@ ev:SetScript("OnEvent", function(_, event, ...)
         C_Timer.NewTicker(5, CheckWindows)
         ns.BuildUI()
         ns.Print("v" .. ns.VERSION .. " loaded - /rwatch to open.")
-        if ns.noCombatLog then ns.Print("Combat log unavailable: kills/tames must be logged manually.") end
     elseif event == "PLAYER_ENTERING_WORLD" then
         if not entered then
             entered = true

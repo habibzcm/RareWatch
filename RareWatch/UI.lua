@@ -991,7 +991,7 @@ local function BuildMain()
     W.Round(main, C.bg, 10)
     RestorePos(main, "mainPos", { "CENTER", UIParent, "CENTER", 0, 40 })
     main:Hide()
-    table.insert(UISpecialFrames, "RareWatchMainFrame")
+    W.EscClose(main)
     main:SetScript("OnHide", function() W.HidePopovers() end)
 
     -- sidebar

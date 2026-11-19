@@ -476,6 +476,19 @@ end
 ---------------------------------------------------------------------------
 -- Popover: a small floating panel anchored to a button.
 ---------------------------------------------------------------------------
+-- Close on Escape without touching Blizzard's UISpecialFrames list (writing to it taints the UI).
+function W.EscClose(f)
+    f:EnableKeyboard(true)
+    f:SetScript("OnKeyDown", function(self, key)
+        if key == "ESCAPE" then
+            pcall(self.SetPropagateKeyboardInput, self, false)
+            self:Hide()
+        else
+            pcall(self.SetPropagateKeyboardInput, self, true)
+        end
+    end)
+end
+
 local popovers = {}
 function W.Popover(name, w, h)
     local p = CreateFrame("Frame", name, UIParent)
@@ -487,7 +500,7 @@ function W.Popover(name, w, h)
     W.Round(p, C.popEdge, 8)
     W.Round(p, C.pop, 7, "BACKGROUND", 1, 1)
     p:Hide()
-    table.insert(UISpecialFrames, name)
+    W.EscClose(p)
     table.insert(popovers, p)
     function p:Open(anchor, point, relPoint, x, y)
         for _, o in ipairs(popovers) do if o ~= self then o:Hide() end end
