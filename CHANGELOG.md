@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.1
+- Fixed the "Blocked by the game: UNKNOWN()" spam in chat when using abilities or cooldowns in combat with the RareWatch window open. The window no longer changes the game's key-passing setting during combat.
+
 ## 0.6.0
 - New: **Drops.** Every rare now has a Drops tab showing its loot: gold, tameable family, and items with drop chances, with the AH price if you use the Flip addon (vendor price otherwise). Search the Browse list by item name ("Mark of the Pack Leader") and filter to tameable rares.
 - Drop rates seen in WoW Forever come from ForeverDB.net data and are tagged "seen". Items added in Forever are tagged "new" (small samples, rates are rough). Everything else is vanilla data and may differ in Forever.

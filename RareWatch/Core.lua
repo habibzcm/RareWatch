@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.6.0"
+ns.VERSION = "0.6.1"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"

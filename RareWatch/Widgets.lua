@@ -512,13 +512,24 @@ end
 ---------------------------------------------------------------------------
 -- Close on Escape without touching Blizzard's UISpecialFrames list (writing to it taints the UI).
 function W.EscClose(f)
+    -- Keys must keep reaching the game while a window is open. The game forbids changing the key-passing
+    -- setting during combat (it logs a blocked action), so it is set once, out of combat, and left alone.
+    local function Pass(v)
+        if not (InCombatLockdown and InCombatLockdown()) then
+            pcall(f.SetPropagateKeyboardInput, f, v)
+        end
+    end
     f:EnableKeyboard(true)
+    Pass(true)
+    f:HookScript("OnShow", function() Pass(true) end)
     f:SetScript("OnKeyDown", function(self, key)
-        if key == "ESCAPE" then
-            pcall(self.SetPropagateKeyboardInput, self, false)
-            self:Hide()
+        if key ~= "ESCAPE" then return end
+        if InCombatLockdown and InCombatLockdown() then
+            self:Hide()                       -- in combat: just close; the Esc menu may open too
         else
-            pcall(self.SetPropagateKeyboardInput, self, true)
+            Pass(false)                       -- swallow this Esc so the game menu stays shut
+            self:Hide()
+            C_Timer.After(0, function() Pass(true) end)
         end
     end)
 end
