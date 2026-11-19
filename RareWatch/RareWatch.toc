@@ -2,11 +2,13 @@
 ## Title: RareWatch
 ## Notes: Rare spawn tracker - kill, tame and sighting timers shared automatically between all users.
 ## Author: Habibz
-## Version: 0.5.2
+## Version: 0.6.0
 ## IconTexture: Interface\Icons\Ability_Hunter_BeastTaming
 ## SavedVariables: RareWatchDB
 
 RareData.lua
+DropData.lua
+Drops.lua
 Core.lua
 Widgets.lua
 UI.lua

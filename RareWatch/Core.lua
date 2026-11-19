@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.5.2"
+ns.VERSION = "0.6.0"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -735,11 +735,32 @@ function ns.PlayAlertSound(idx)
     pcall(PlaySound, s.id, "Master")
 end
 
+-- Big text on screen: our own frame, so we never call Blizzard's raid-warning code (which can get us blocked).
+local bigFrame, bigTimer
+function ns.BigText(text)
+    if not bigFrame then
+        bigFrame = CreateFrame("Frame", nil, UIParent)
+        bigFrame:SetSize(800, 60)
+        bigFrame:SetPoint("TOP", UIParent, "TOP", 0, -170)
+        bigFrame:SetFrameStrata("FULLSCREEN_DIALOG")
+        bigFrame.text = bigFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+        bigFrame.text:SetPoint("CENTER")
+        bigFrame.text:SetTextColor(1, 0.82, 0.2)
+        bigFrame:Hide()
+    end
+    bigFrame.text:SetText(text)
+    bigFrame:SetAlpha(1)
+    bigFrame:Show()
+    bigTimer = (bigTimer or 0) + 1
+    local mine = bigTimer
+    C_Timer.After(4, function()
+        if mine == bigTimer then bigFrame:Hide() end
+    end)
+end
+
 function ns.Alert(text)
     local o = ns.opt
-    if o.alertRaidWarn and RaidNotice_AddMessage and RaidWarningFrame then
-        RaidNotice_AddMessage(RaidWarningFrame, text, ChatTypeInfo["RAID_WARNING"])
-    end
+    if o.alertRaidWarn then ns.BigText(text) end
     if o.alertSound then ns.PlayAlertSound() end
     if o.alertFlash and FlashClientIcon then FlashClientIcon() end
     if o.alertChat then ns.Print(text) end
@@ -880,7 +901,15 @@ local function CheckDeath(unit, guid, npcId, layer)
     Record(def, "DOWN", layer, ns.Now())
 end
 
+-- RareWatch is for the open world: inside dungeons, raids and battlegrounds the elites are not world rares, and
+-- the client restricts what addons may read there.
+local function InInstance()
+    local inside, kind = IsInInstance()
+    return inside and kind ~= nil and kind ~= "none"
+end
+
 local function CheckUnit(unit)
+    if InInstance() then return end
     if not UnitExists(unit) then return end
     local guid = UnitGUID(unit)
     local npcId, layer, spawnUID = ns.ParseGUID(guid)
@@ -1205,7 +1234,7 @@ ev:SetScript("OnEvent", function(_, event, ...)
         end
     elseif event == "UNIT_HEALTH" or event == "UNIT_HEALTH_FREQUENT" then
         local unit = ...
-        if unit and (unit == "target" or unit == "mouseover" or unit:find("^nameplate%d")) and UnitIsDead(unit) then
+        if unit and not InInstance() and (unit == "target" or unit == "mouseover" or unit:find("^nameplate%d")) and UnitIsDead(unit) then
             CheckUnit(unit)
         end
     elseif event == "CHAT_MSG_ADDON" then

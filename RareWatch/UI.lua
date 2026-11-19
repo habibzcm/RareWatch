@@ -246,17 +246,6 @@ local function BuildTracker(page)
     local editResp = W.Button(d, { icon = "pencil", w = 22, h = 22, style = "ghost",
         tip = { "Edit respawn time", "Set the min/max respawn, or use the measured times." } })
     editResp:SetPoint("LEFT", chip2, "RIGHT", 4, 0)
-    chip1:SetScript("OnEnter", function(self)
-        local def = SelectedDef()
-        if not def then return end
-        GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:SetText("Respawn time", 1, 1, 1)
-        GameTooltip:AddLine("Source: " .. (def.respawnSrc or "your setting"), 0.75, 0.77, 0.8)
-        if def.respawnSrc == "database estimate" then
-            GameTooltip:AddLine("From private-server data (cmangos), not Blizzard. Replace it with measured times once you have some.", 0.6, 0.62, 0.68, true)
-        end
-        GameTooltip:Show()
-    end)
     chip1:SetScript("OnLeave", function() GameTooltip:Hide() end)
     chip2:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
@@ -267,8 +256,14 @@ local function BuildTracker(page)
     chip2:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     -- layers
-    local layersHead = W.Text(d, 11, "M", "Layers", C.muted)
-    layersHead:SetPoint("TOPLEFT", PAD, -232)
+    -- layers / drops tabs
+    local detailTab = "layers"
+    local tabLayers = W.Button(d, { text = "Layers", h = 24, size = 11 })
+    tabLayers:SetPoint("TOPLEFT", PAD, -232)
+    local tabDrops = W.Button(d, { text = "Drops", icon = "sparkles", h = 24, size = 11 })
+    tabDrops:SetPoint("LEFT", tabLayers, "RIGHT", 6, 0)
+    local layersHead = tabLayers
+    local dropNote = W.Text(d, 10, "R", "Vanilla loot data. Forever may differ.", C.muted, "RIGHT")
     local layerList
     layerList = W.List(d, 4 * 28, 28, function(list)
         local r = CreateFrame("Frame", nil, list)
@@ -300,6 +295,77 @@ local function BuildTracker(page)
     end)
     layerList:SetPoint("TOPLEFT", PAD, -248)
     layerList:SetPoint("TOPRIGHT", -PAD + 8, -248)
+
+    local dropList
+    dropList = W.List(d, 6 * 24, 24, function(list)
+        local r = CreateFrame("Frame", nil, list)
+        r:EnableMouse(true)
+        r.name = W.Cell(r, 12, "M", 236)
+        r.name:SetPoint("LEFT", 0, 0)
+        r.pct = W.Cell(r, 12, "R", 56, C.sec, "RIGHT")
+        r.pct:SetPoint("LEFT", 240, 0)
+        r.val = W.Cell(r, 11, "R", 124, C.muted, "RIGHT")
+        r.val:SetPoint("RIGHT", 0, 0)
+        r.sep = W.Line(r)
+        r.sep:SetPoint("BOTTOMLEFT")
+        r.sep:SetPoint("BOTTOMRIGHT")
+        r.sep:SetAlpha(0.6)
+        r:SetScript("OnEnter", function(self)
+            local row = self.row
+            if row and row.kind == "item" then
+                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+                local ok = pcall(GameTooltip.SetHyperlink, GameTooltip, "item:" .. row.id)
+                if not ok then GameTooltip:SetText(row.name, 1, 1, 1) end
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(string.format("%g%% chance%s", row.pct, row.quest and " (quest item)" or ""), 0.6, 0.62, 0.68)
+                GameTooltip:AddLine(row.seen and "Measured in WoW Forever (ForeverDB.net)" or (row.wh and "New in Forever - small sample, rate is rough" or "Vanilla value - Forever may differ"), 0.6, 0.62, 0.68)
+                GameTooltip:Show()
+            elseif row and row.kind == "pool" then
+                GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+                GameTooltip:SetText(ns.PoolText(row), 1, 1, 1)
+                GameTooltip:AddLine("One item picked at random from a pool of " .. row.n .. ". Any single item is a long shot.", 0.75, 0.77, 0.8, true)
+                GameTooltip:Show()
+            end
+        end)
+        r:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        return r
+    end, function(r, row, idx)
+        r.row = row
+        r.sep:SetShown(idx < #dropList.data)
+        if row.kind == "gold" then
+            r.name:SetText("Gold"); W.SetColor(r.name, C.yellow)
+            r.pct:SetText("")
+            r.val:SetText(ns.CoinText(row.min) .. " - " .. ns.CoinText(row.max)); W.SetColor(r.val, C.text2)
+        elseif row.kind == "tame" then
+            r.name:SetText("Tameable"); W.SetColor(r.name, C.accent)
+            r.pct:SetText("")
+            r.val:SetText(row.family); W.SetColor(r.val, C.text2)
+        elseif row.kind == "pool" then
+            r.name:SetText("|cff" .. ns.QualityHex(row.q) .. ns.PoolText(row) .. "|r")
+            r.pct:SetText(string.format("%g%%", row.pct)); W.SetColor(r.pct, C.sec)
+            r.val:SetText("1 of " .. row.n); W.SetColor(r.val, C.muted)
+        else
+            r.name:SetText("|cff" .. ns.QualityHex(row.q) .. row.name .. "|r" .. (row.quest and ("  " .. Hex(C.muted) .. "quest|r") or "") .. ((row.seen or row.wh) and ("  " .. Hex(C.accent) .. (row.seen and "seen|r" or "new|r")) or ""))
+            r.pct:SetText(string.format("%g%%", row.pct)); W.SetColor(r.pct, row.pct >= 25 and C.accent or C.sec)
+            local worth, src = ns.ItemWorth(row.id)
+            if worth then
+                r.val:SetText(Hex(C.text2) .. ns.CoinText(worth) .. "|r  " .. src)
+            else
+                r.val:SetText("")
+            end
+            W.SetColor(r.val, C.muted)
+        end
+    end, 0)
+    dropList:SetPoint("TOPLEFT", PAD, -248)
+    dropList:SetPoint("TOPRIGHT", -PAD + 8, -248)
+
+    local function SetTab(t)
+        detailTab = t
+        ns.RefreshMain()
+    end
+    ns.SetDetailTab = SetTab
+    tabLayers:SetScript("OnClick", function() SetTab("layers") end)
+    tabDrops:SetScript("OnClick", function() SetTab("drops") end)
 
     -- actions
     local feedback = W.Cell(d, 11, "R", TW, C.muted)
@@ -553,13 +619,28 @@ local function BuildTracker(page)
         chip1:SetPoint("TOPLEFT", PAD, y0)
         layersHead:ClearAllPoints()
         layersHead:SetPoint("TOPLEFT", PAD, y0 - 40)
-        layerList:ClearAllPoints()
-        layerList:SetPoint("TOPLEFT", PAD, y0 - 56)
-        layerList:SetPoint("TOPRIGHT", -PAD + 8, y0 - 56)
+        for _, lst in ipairs({ layerList, dropList }) do
+            lst:ClearAllPoints()
+            lst:SetPoint("TOPLEFT", PAD, y0 - 72)
+            lst:SetPoint("TOPRIGHT", -PAD + 8, y0 - 72)
+        end
+        dropNote:ClearAllPoints()
+        dropNote:SetPoint("TOPRIGHT", -PAD + 8, y0 - 46)
 
         local L = ns.Layers(def)
-        layersHead:SetText("Layers" .. (#L > 0 and ("  " .. #L) or ""))
-        layerList:SetData(L, "No layer reports yet")
+        tabLayers:SetLabel("Layers" .. (#L > 0 and ("  " .. #L) or ""))
+        tabLayers:SetStyle(detailTab == "layers" and "accent" or "default")
+        tabDrops:SetStyle(detailTab == "drops" and "accent" or "default")
+        layerList:SetShown(detailTab == "layers")
+        dropList:SetShown(detailTab == "drops")
+        dropNote:SetText(ns.DropsSeen(def.id) and "Forever rates: ForeverDB.net data + small samples" or "Vanilla loot data. Forever may differ.")
+        dropNote:SetShown(detailTab == "drops" and ns.DropRows(def.id) ~= nil)
+        if detailTab == "layers" then
+            layerList:SetData(L, "No layer reports yet")
+        else
+            local rows = ns.DropRows(def.id)
+            dropList:SetData(rows or {}, rows and "No drop data." or "No drop data for this mob.")
+        end
         waypoint:SetShown(info and info.coords and info.coords[1] and true or false)
         W.SetColor(bell.icon, def.alert and C.accent or C.muted)
     end
@@ -573,14 +654,14 @@ local function BuildBrowse(page)
     local count = W.Text(page, 12, "R", "", C.muted)
     count:SetPoint("LEFT", title, "RIGHT", 12, -1)
 
-    local search = W.Edit(page, 230, 30, "Search name or zone")
+    local search = W.Edit(page, 230, 30, "Search name, zone or drop")
     search:SetPoint("TOPRIGHT", -56, -16)
     local sIcon = W.Icon(search, "search", 14, C.muted)
     sIcon:SetPoint("RIGHT", -10, 0)
 
-    local filt = { elite = false, seen = false, untracked = false }
+    local filt = { elite = false, seen = false, untracked = false, tame = false }
     local x = 20
-    for _, f in ipairs({ { "elite", "Rare elites" }, { "seen", "Seen in Forever" }, { "untracked", "Not tracked" } }) do
+    for _, f in ipairs({ { "elite", "Rare elites" }, { "seen", "Seen in Forever" }, { "untracked", "Not tracked" }, { "tame", "Tameable" } }) do
         local c = W.ToggleChip(page, f[2], function() return filt[f[1]] end, function(v) filt[f[1]] = v; refreshers[2]() end)
         c:SetPoint("TOPLEFT", x, -62)
         x = x + c:GetWidth() + 6
@@ -595,7 +676,7 @@ local function BuildBrowse(page)
         r:EnableMouse(true)
         r.name = W.Cell(r, 12, "M", 290)
         r.name:SetPoint("TOPLEFT", 14, -8)
-        r.sub = W.Cell(r, 11, "R", 300, C.muted)
+        r.sub = W.Cell(r, 11, "R", 314, C.muted)
         r.sub:SetPoint("TOPLEFT", 14, -26)
         r.resp = W.Cell(r, 12, "R", 90, C.sec)
         r.resp:SetPoint("LEFT", 330, 0)
@@ -633,10 +714,19 @@ local function BuildBrowse(page)
                         0.9, 0.9, 0.9, 0.37, 0.84, 0.66)
                 end
             end
+            local drops = ns.DropRows(info.id)
+            if drops then
+                local shown = 0
+                for _, d in ipairs(drops) do
+                    if d.kind == "item" and shown < 5 then
+                        if shown == 0 then GameTooltip:AddLine(" "); GameTooltip:AddLine("Drops", 0.6, 0.62, 0.68) end
+                        GameTooltip:AddDoubleLine("|cff" .. ns.QualityHex(d.q) .. d.name .. "|r", string.format("%g%%", d.pct), 1, 1, 1, 0.75, 0.77, 0.8)
+                        shown = shown + 1
+                    end
+                end
+            end
             if info.discovered then
                 GameTooltip:AddLine("Not in the built-in list - discovered in Forever.", 0.37, 0.84, 0.66, true)
-            elseif info.rmin then
-                GameTooltip:AddLine("Respawn estimate is from private-server data (cmangos), not Blizzard.", 0.6, 0.62, 0.68, true)
             end
             GameTooltip:Show()
         end)
@@ -646,8 +736,13 @@ local function BuildBrowse(page)
         r.info = info
         local tracked = ns.Lookup(info.id, info.name)
         r.name:SetText(info.name .. (info.discovered and ("   " .. Hex(C.accent) .. "NEW|r") or ""))
-        r.sub:SetText((info.zone or "Unknown zone") .. DOT .. "level " .. (info.minl or "?") .. DOT
-            .. (info.rank == 2 and "Rare elite" or "Rare"))
+        local fam = ns.TameFamily(info.id)
+        if info.dropHit then
+            r.sub:SetText(Hex(C.accent) .. "Drops " .. info.dropHit .. "|r" .. DOT .. (info.zone or "Unknown zone"))
+        else
+            r.sub:SetText((info.zone or "Unknown zone") .. DOT .. "level " .. (info.minl or "?") .. DOT
+                .. (info.rank == 2 and "Rare elite" or "Rare") .. (fam and (DOT .. Hex(C.accent) .. "Tame: " .. fam .. "|r") or ""))
+        end
         r.resp:SetText(info.rmin and (ns.Hours(info.rmin) .. " - " .. ns.Hours(info.rmax) .. " h") or "Unknown")
         local any = ns.LookupAny(info.id, info.name, false)
         local st = any and ns.Summary(any)
@@ -729,7 +824,12 @@ local function BuildBrowse(page)
         for _, info in pairs(ns.rareIndex) do
             total = total + 1
             local ok = true
-            if q ~= "" and not (info.name:lower():find(q, 1, true) or (info.zone and info.zone:lower():find(q, 1, true))) then ok = false end
+            info.dropHit = nil
+            if q ~= "" and not (info.name:lower():find(q, 1, true) or (info.zone and info.zone:lower():find(q, 1, true))) then
+                info.dropHit = ns.DropMatchName(info.id, q)
+                if not info.dropHit then ok = false end
+            end
+            if ok and filt.tame and not ns.TameFamily(info.id) then ok = false end
             if ok and filt.elite and info.rank ~= 2 then ok = false end
             if ok and filt.seen and not ns.LastSeenInForever(info.id) then ok = false end
             if ok and filt.untracked and ns.Lookup(info.id, info.name) then ok = false end
@@ -805,7 +905,7 @@ local function BuildSettings(page)
     PageTitle(page, "Settings")
     local o = ns.opt
     local refreshables = {}
-    local COLW, ROWH = 318, 28
+    local COLW, ROWH = 318, 25
     local cols = { { x = 20, y = -60 }, { x = 20 + COLW + 34, y = -60 } }
 
     local function Section(ci, text)

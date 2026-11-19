@@ -20,7 +20,7 @@ Open an [issue](../../issues). For bugs it helps a lot to include your RareWatch
 
 ## Data and credits
 
-The rare list comes from [QuestieDB](https://github.com/Questie/QuestieDB) (names, levels, Forever map coordinates), and the respawn estimates come from [cmangos classic-db](https://github.com/cmangos/classic-db). The estimates are emulator values, so they can differ from what Forever actually does. See [NOTICE.txt](NOTICE.txt). RareWatch is not affiliated with the Questie team.
+The rare list comes from [QuestieDB](https://github.com/Questie/QuestieDB) (names, levels, Forever map coordinates), and the respawn estimates come from [cmangos classic-db](https://github.com/cmangos/classic-db). The estimates are emulator values, so they can differ from what Forever actually does. Drop rates seen in WoW Forever are data from [ForeverDB.net](https://foreverdb.net); items new in Forever were noted from Wowhead's WoW Forever pages, and the remaining drops are cmangos vanilla data. See [NOTICE.txt](NOTICE.txt). RareWatch is not affiliated with the Questie team, ForeverDB.net or Wowhead.
 
 The interface uses the [Inter](https://rsms.me/inter/) font (SIL OFL) and [Tabler Icons](https://tabler.io/icons) (MIT). Their licenses are in `RareWatch/media`.
 

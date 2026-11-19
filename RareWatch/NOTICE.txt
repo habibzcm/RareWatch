@@ -14,5 +14,16 @@ RareData.lua is generated from:
    Respawn time estimates (creature.spawntimesecsmin / spawntimesecsmax), GPL.
    These are emulator values, not official Blizzard data, and may differ in WoW Forever.
 
+3. ForeverDB.net - https://foreverdb.net
+   Data from ForeverDB.net (https://foreverdb.net). Drop rates "seen in Forever" (measured over
+   ForeverDB players' kills in WoW Forever) come from the ForeverDB addon's Data/Rares.lua,
+   GPL-3.0 with an attribution term. Copyright (C) 2026 ForeverDB.net. RareWatch is not affiliated
+   with or endorsed by ForeverDB.net.
+
+DropData.lua is generated from the cmangos classic-db project (creature_loot_template,
+reference_loot_template, item_template, creature_template) and ForeverDB.net's rare loot data.
+Rows marked "seen" are Forever measurements from ForeverDB; rows marked "new" are items added in Forever whose rates were noted by hand from Wowhead's WoW Forever pages (small samples; Wowhead is not affiliated with RareWatch); all other drop chances are vanilla emulator values
+and may differ in WoW Forever.
+
 Because RareWatch includes this data, RareWatch as a whole is distributed under the
 GNU General Public License v3.0 (https://www.gnu.org/licenses/gpl-3.0.html).

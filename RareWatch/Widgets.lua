@@ -423,7 +423,35 @@ function W.List(parent, height, rowH, makeRow, fillRow, gap)
 
     L.thumb = L:CreateTexture(nil, "OVERLAY")
     L.thumb:SetColorTexture(C.track2[1], C.track2[2], C.track2[3], 1)
-    L.thumb:SetWidth(3)
+    L.thumb:SetWidth(4)
+
+    -- the scroll bar: click anywhere on it to jump, drag to scroll
+    L.track = CreateFrame("Frame", nil, L)
+    L.track:SetWidth(12)
+    L.track:SetPoint("TOPRIGHT", 0, 0)
+    L.track:SetPoint("BOTTOMRIGHT", 0, 0)
+    L.track:EnableMouse(true)
+    L.track:SetFrameLevel((L:GetFrameLevel() or 0) + 5)
+    local function SetFromCursor()
+        local n = #L.data
+        local maxOff = math.max(0, n - L.visible)
+        if maxOff == 0 then return end
+        local _, cy = GetCursorPosition()
+        local top, h = L:GetTop(), L:GetHeight()
+        if not (cy and top and h) then return end
+        cy = cy / L:GetEffectiveScale()
+        local th = L.thumbH or 24
+        local frac = (top - cy - th / 2) / math.max(1, h - th)
+        frac = math.max(0, math.min(1, frac))
+        local off = math.floor(frac * maxOff + 0.5)
+        if off ~= L.offset then L.offset = off; L:Refresh() end
+    end
+    L.track:SetScript("OnMouseDown", function(self, btn)
+        if btn == "LeftButton" then self.drag = true; SetFromCursor() end
+    end)
+    L.track:SetScript("OnMouseUp", function(self) self.drag = false end)
+    L.track:SetScript("OnHide", function(self) self.drag = false end)
+    L.track:SetScript("OnUpdate", function(self) if self.drag then SetFromCursor() end end)
 
     L.empty = W.Text(L, 12, "R", "", C.muted, "CENTER")
     L.empty:SetPoint("CENTER")
@@ -458,6 +486,7 @@ function W.List(parent, height, rowH, makeRow, fillRow, gap)
             local h = self:GetHeight()
             local th = math.max(24, h * self.visible / n)
             self.thumb:SetHeight(th)
+            self.thumbH = th
             self.thumb:ClearAllPoints()
             self.thumb:SetPoint("TOPRIGHT", 0, -((h - th) * self.offset / maxOff))
             self.thumb:Show()
@@ -469,6 +498,11 @@ function W.List(parent, height, rowH, makeRow, fillRow, gap)
     L:SetScript("OnMouseWheel", function(self, delta)
         self.offset = math.max(0, self.offset - delta)
         self:Refresh()
+    end)
+    L.track:EnableMouseWheel(true)
+    L.track:SetScript("OnMouseWheel", function(_, delta)
+        L.offset = math.max(0, L.offset - delta)
+        L:Refresh()
     end)
     return L
 end
