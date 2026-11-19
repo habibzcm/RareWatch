@@ -1,0 +1,31 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you see instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: RareWatch version
+      description: Shown in the bottom left of the RareWatch window, or in the .toc file
+      placeholder: "0.5.0"
+    validations:
+      required: true
+  - type: textarea
+    id: debug
+    attributes:
+      label: Output of /rwatch debug
+      description: Type /rwatch debug in game and paste what it prints in chat
+      render: text
+  - type: textarea
+    id: errors
+    attributes:
+      label: Lua errors
+      description: If a red error box appeared, paste its text here
+      render: text

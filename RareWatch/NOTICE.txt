@@ -1,0 +1,18 @@
+RareWatch - third-party data notice
+===================================
+
+RareData.lua is generated from:
+
+1. QuestieDB - https://github.com/Questie/QuestieDB
+   File: data/Forever/foreverNpcDB.lua (NPC names, levels, rank, Forever map coordinates)
+   and data/Forever/conversion.json (zone names and UI map IDs).
+   Questie / QuestieDB content is shared by the Questie team under GPLv3 terms
+   (see their LICENSE.md for details). "Questie" is their name and logo; RareWatch is
+   not affiliated with or endorsed by the Questie team.
+
+2. cmangos classic-db - https://github.com/cmangos/classic-db
+   Respawn time estimates (creature.spawntimesecsmin / spawntimesecsmax), GPL.
+   These are emulator values, not official Blizzard data, and may differ in WoW Forever.
+
+Because RareWatch includes this data, RareWatch as a whole is distributed under the
+GNU General Public License v3.0 (https://www.gnu.org/licenses/gpl-3.0.html).
