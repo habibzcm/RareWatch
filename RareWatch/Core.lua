@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.5.0"
+ns.VERSION = "0.5.1"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -681,13 +681,20 @@ function ns.SyncNow()
 end
 ns.RequestSync = ns.SyncNow
 
-function ns.HideChannel()
-    if not ChatFrame_RemoveChannel then return end
-    for i = 1, (NUM_CHAT_WINDOWS or 10) do
-        local cf = _G["ChatFrame" .. i]
-        if cf then pcall(ChatFrame_RemoveChannel, cf, CHANNEL) end
-    end
+-- The sync channel only carries addon data. We never touch the chat windows (editing them
+-- can taint the UI and trigger "blocked from an action" warnings); we just hide its join notices.
+local function ChannelNoticeFilter(_, _, ...)
+    local name = select(4, ...)
+    local ok, hide = pcall(function()
+        return type(name) == "string" and name:find(CHANNEL, 1, true) ~= nil
+    end)
+    return ok and hide or false
 end
+if ChatFrame_AddMessageEventFilter then
+    pcall(ChatFrame_AddMessageEventFilter, "CHAT_MSG_CHANNEL_NOTICE", ChannelNoticeFilter)
+    pcall(ChatFrame_AddMessageEventFilter, "CHAT_MSG_CHANNEL_NOTICE_USER", ChannelNoticeFilter)
+end
+function ns.HideChannel() end
 
 -- Joining a channel needs a click or key press, so this only runs from one.
 -- After the first join the game keeps you in the channel on every login.
