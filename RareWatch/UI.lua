@@ -627,8 +627,10 @@ local function BuildTracker(page)
         dropNote:ClearAllPoints()
         dropNote:SetPoint("TOPRIGHT", -PAD + 8, y0 - 46)
 
-        local L = ns.Layers(def)
-        tabLayers:SetLabel("Layers" .. (#L > 0 and ("  " .. #L) or ""))
+        local L = ns.Layers(def, true)
+        local real = 0
+        for _, st in ipairs(L) do if not st.empty then real = real + 1 end end
+        tabLayers:SetLabel("Layers" .. (real > 0 and ("  " .. real) or ""))
         tabLayers:SetStyle(detailTab == "layers" and "accent" or "default")
         tabDrops:SetStyle(detailTab == "drops" and "accent" or "default")
         layerList:SetShown(detailTab == "layers")

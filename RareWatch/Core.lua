@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.6.1"
+ns.VERSION = "0.6.2"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -146,6 +146,56 @@ local listeners = {}
 function ns.OnChange(fn) table.insert(listeners, fn) end
 function ns.Changed() for _, fn in ipairs(listeners) do fn() end end
 
+-- Same, but merges a burst (a batch from another player) into one refresh.
+local changedPending = false
+function ns.ChangedSoon()
+    if changedPending then return end
+    changedPending = true
+    C_Timer.After(0.3, function()
+        changedPending = false
+        ns.Changed()
+    end)
+end
+
+---------------------------------------------------------------------------
+-- Retention: how long a layer's record is kept and shown depends on the rare's own respawn time.
+-- (A flat limit threw away long-respawn rares before their window even opened.)
+---------------------------------------------------------------------------
+local MAX_LAYERS = 40        -- layer records kept per rare
+local HISTORY_MAX = 500      -- events kept in History
+local MAX_DISCOVERED = 400   -- rares discovered in game, kept in the list
+
+function ns.KeepFor(def)     -- stored this long after the last event
+    return math.min(14 * 86400, math.max(7 * 86400, 3 * (def and def.max or 0)))
+end
+function ns.ShowFor(def)     -- listed this long after the last event (your own layer is always listed)
+    return math.min(7 * 86400, math.max(48 * 3600, 2 * (def and def.max or 0) + 12 * 3600))
+end
+
+local digestVer = 0
+function ns.BumpDigest() digestVer = digestVer + 1 end
+
+local function LatestOf(r) return math.max(r.down or 0, r.seen or 0, r.spawn or 0) end
+
+-- Drop records past their keep time; if a rare has too many layers, drop the stalest.
+function ns.PruneDef(def, t)
+    t = t or ns.Now()
+    local keep, n = ns.KeepFor(def), 0
+    for layer, r in pairs(def.layers or {}) do
+        if t - LatestOf(r) > keep then def.layers[layer] = nil else n = n + 1 end
+    end
+    while n > MAX_LAYERS do
+        local oldL, oldT
+        for layer, r in pairs(def.layers) do
+            local l = LatestOf(r)
+            if not oldT or l < oldT then oldL, oldT = layer, l end
+        end
+        if not oldL then break end
+        def.layers[oldL] = nil
+        n = n - 1
+    end
+end
+
 ---------------------------------------------------------------------------
 -- Database
 ---------------------------------------------------------------------------
@@ -191,6 +241,7 @@ function ns.AddMob(name, id, min, max)
         end
     end
     ns.RebuildIndex()
+    digestVer = digestVer + 1
     ns.Changed()
     return def, isNew
 end
@@ -203,6 +254,7 @@ function ns.RemoveMob(def)
             samples = def.samples, shadow = true, enabled = true, alert = false }
     end
     ns.RebuildIndex()
+    digestVer = digestVer + 1
     ns.Changed()
 end
 
@@ -212,6 +264,9 @@ function ns.GetRec(def, layer)
     if not r then
         r = {}
         def.layers[layer] = r
+        local n = 0
+        for _ in pairs(def.layers) do n = n + 1 end
+        if n > MAX_LAYERS then ns.PruneDef(def) end
     end
     return r
 end
@@ -219,7 +274,7 @@ end
 local function AddHistory(def, kind, layer, t, src)
     local h = ns.db.history
     table.insert(h, 1, { t = t, k = kind, l = layer, s = src, n = def.name })
-    for i = #h, 251, -1 do h[i] = nil end
+    for i = #h, HISTORY_MAX + 1, -1 do h[i] = nil end
 end
 
 -- Returns true if the event changed what we know.
@@ -236,6 +291,7 @@ function ns.ApplyEvent(def, kind, layer, t, src)
         if r.spawn and r.spawn <= t then r.spawn, r.spawnSrc = nil, nil end
         if r.seen and r.seen <= t then r.seen, r.seenSrc = nil, nil end
         AddHistory(def, kind, layer, t, src)
+        digestVer = digestVer + 1
         return true
     elseif kind == "SEEN" then
         if r.down and t <= r.down then return false end
@@ -252,6 +308,7 @@ function ns.ApplyEvent(def, kind, layer, t, src)
         if r.down then AddSample(def, r.down, t, true) end
         r.spawn, r.spawnSrc = t, src
         if first then AddHistory(def, kind, layer, t, src) end
+        digestVer = digestVer + 1
         return true
     end
     return false
@@ -300,21 +357,20 @@ function ns.InitDB()
     for _, def in pairs(db.mobs) do
         def.enabled = true -- v0.4 removed the per-mob on/off switch
         if def.alert == nil then def.alert = true end
-        for layer, r in pairs(def.layers or {}) do
-            r.heard = nil
-            local latest = math.max(r.down or 0, r.seen or 0, r.spawn or 0)
-            if t - latest > 72 * 3600 then def.layers[layer] = nil end
-        end
+        def.layers = def.layers or {}
+        for _, r in pairs(def.layers) do r.heard = nil end
+        ns.PruneDef(def, t)
     end
     for id, def in pairs(db.shadow) do
         def.shadow, def.enabled, def.alert = true, true, false
         def.layers = def.layers or {}
-        for layer, r in pairs(def.layers) do
-            r.heard = nil
-            local latest = math.max(r.down or 0, r.seen or 0, r.spawn or 0)
-            if t - latest > 72 * 3600 then def.layers[layer] = nil end
-        end
+        for _, r in pairs(def.layers) do r.heard = nil end
+        ns.PruneDef(def, t)
         if next(def.layers) == nil and not def.samples then db.shadow[id] = nil end
+    end
+    -- rares found in game that nobody has seen for two months
+    for id, d in pairs(db.discovered) do
+        if t - (d.last or d.first or 0) > 60 * 86400 then db.discovered[id] = nil end
     end
     ns.RebuildIndex()
     ns.BuildRareIndex()
@@ -417,7 +473,7 @@ end
 -- Measured respawns: one sample per kill/tame, keyed by the kill time.
 AddSample = function(def, down, spawnedAt, exact)
     local d = spawnedAt - down
-    if d < 60 or d > 72 * 3600 then return end
+    if d < 60 or d > math.min(14 * 86400, math.max(72 * 3600, 2 * (def.max or 0))) then return end
     def.samples = def.samples or {}
     local old = def.samples[down]
     if old and old.e and not exact then return end
@@ -487,16 +543,22 @@ function ns.RecStatus(def, r, t)
     return s
 end
 
-function ns.Layers(def)
+function ns.Layers(def, withCurrent)
     local t, out = ns.Now(), {}
+    local cur = ns.LayerFor(def)
+    local show, haveCur = ns.ShowFor(def), false
     for layer, r in pairs(def.layers) do
         local st = ns.RecStatus(def, r, t)
-        if st.latest > 0 and t - st.latest < 48 * 3600 then
+        -- your own layer stays listed however old its record is (until it is pruned)
+        if st.latest > 0 and (t - st.latest < show or layer == cur) then
             st.layer, st.rec = layer, r
             table.insert(out, st)
+            if layer == cur then haveCur = true end
         end
     end
-    local cur = ns.LayerFor(def)
+    if withCurrent and cur and not haveCur then
+        table.insert(out, { code = "NONE", text = "no reports yet", prio = 9, sort = 0, latest = 0, layer = cur, rec = {}, empty = true })
+    end
     table.sort(out, function(a, b)
         local ac, bc = a.layer == cur, b.layer == cur
         if ac ~= bc then return ac end
@@ -571,7 +633,9 @@ local function Shareable(t)
     local out = {}
     for _, def in ipairs(ns.AllDefs()) do
         for layer, r in pairs(def.layers) do
-            if r.down and t - r.down < def.max + 6 * 3600 then out[#out + 1] = { def, r.downKind or "DOWN", layer, r.down, r } end
+            local info = ns.RareInfo(def.id)
+            local win = math.min(7 * 86400, math.max(def.max or 0, info and info.rmax or 0)) + 6 * 3600
+            if r.down and t - r.down < win then out[#out + 1] = { def, r.downKind or "DOWN", layer, r.down, r } end
             if r.spawn and t - r.spawn < 24 * 3600 then out[#out + 1] = { def, "SPAWN", layer, r.spawn, r } end
             if r.seen and t - r.seen < 6 * 3600 then out[#out + 1] = { def, "SEEN", layer, r.seen, r } end
         end
@@ -587,15 +651,28 @@ end
 
 -- Short summary of our kills/tames/spawns. Peers compare it with theirs to notice missing data.
 -- (Sightings are left out: they change every few minutes and would cause constant resyncs.)
+-- The window is the rare's built-in respawn, not the local setting, so users who edited their timers still agree.
+-- The result is cached: it only changes when our data does (or as events age out, so at most a minute stale).
+local digestCache
 function ns.Digest()
-    local keys = {}
-    for _, e in ipairs(Shareable(ns.Now())) do
+    local now = GetTime()
+    if digestCache and digestCache.ver == digestVer and now - digestCache.at < 60 then
+        return digestCache.n, digestCache.h
+    end
+    local t, keys = ns.Now(), {}
+    for _, e in ipairs(Shareable(t)) do
         if e[2] ~= "SEEN" then
-            keys[#keys + 1] = (e[1].id or e[1].name) .. "/" .. e[3] .. "/" .. KIND_CODE[e[2]] .. "/" .. math.floor(e[4] / 600)
+            local info = ns.RareInfo(e[1].id)
+            local win = math.min(7 * 86400, (info and info.rmax) or (12 * 3600)) + 6 * 3600
+            if t - e[4] < win then
+                keys[#keys + 1] = (e[1].id or e[1].name) .. "/" .. e[3] .. "/" .. KIND_CODE[e[2]] .. "/" .. math.floor(e[4] / 600)
+            end
         end
     end
     table.sort(keys)
-    return #keys, Hash(table.concat(keys, ";"))
+    local n, h = #keys, Hash(table.concat(keys, ";"))
+    digestCache = { ver = digestVer, at = now, n = n, h = h }
+    return n, h
 end
 
 local function SendDiscoveries(t)
@@ -667,9 +744,10 @@ end
 ns.SendHello = SendHello
 
 function ns.OnlineUsers()
-    local n = 0
-    for _, p in pairs(ns.peers) do
-        if GetTime() - p.t < 900 then n = n + 1 end
+    local n, now = 0, GetTime()
+    for who, p in pairs(ns.peers) do
+        if now - p.t < 900 then n = n + 1
+        elseif now - p.t > 3600 then ns.peers[who] = nil end
     end
     return n
 end
@@ -870,6 +948,9 @@ local function Discover(unit, npcId, guid)
             d = { n = UnitName(unit) or "?", c = class, lv = UnitLevel(unit), z = zone, ui = map, x = x, y = y,
                 first = t, last = t, src = "you" }
             if d.n:find(":") then return end
+            local count = 0
+            for _ in pairs(ns.db.discovered) do count = count + 1 end
+            if count >= MAX_DISCOVERED then return end
             ns.db.discovered[npcId] = d
             AddDiscoveredInfo(npcId, d)
             ns.Print("New rare found: " .. d.n .. (zone and (" in " .. zone) or "") .. " - added to the Browse list.")
@@ -894,6 +975,7 @@ local function CheckDeath(unit, guid, npcId, layer)
     local def = ns.LookupAny(npcId, UnitName(unit))
     if not def then return end
     deadSeen[guid] = true
+    for u in pairs(ns.watched) do if UnitGUID(u) == guid then ns.watched[u] = nil end end
     local r = def.layers[layer or "?"]
     local aliveAt = r and math.max(r.seen or 0, r.spawn or 0) or 0
     if r and r.down and r.down >= aliveAt then return end
@@ -907,6 +989,8 @@ local function InInstance()
     local inside, kind = IsInInstance()
     return inside and kind ~= nil and kind ~= "none"
 end
+
+ns.watched = {}   -- nameplate units showing a known rare: polled for death (cheaper than listening to every unit's health)
 
 local function CheckUnit(unit)
     if InInstance() then return end
@@ -932,6 +1016,7 @@ local function CheckUnit(unit)
     if not def or not def.enabled then return end
     if not def.id then def.id = npcId; ns.RebuildIndex() end
 
+    if unit:find("^nameplate") then ns.watched[unit] = true end
     lastGUID[def.name] = guid
     lastSeenAt[def.name] = GetTime()
     if not def.ui and not ns.RareInfo(npcId) then def.ui = PlayerMap() end
@@ -1015,8 +1100,13 @@ local function VersionNum(v)
 end
 
 -- One event from another player (tracked or not). Returns true if it changed anything.
+local function ValidLayer(l)
+    return type(l) == "string" and #l <= 12 and (l == "?" or l:match("^[%w%._%-]+$") ~= nil)
+end
+
 local function ApplyRemote(id, name, kind, layer, t, who)
-    if not ns.EVENT_INFO[kind] or not t or not layer or layer == "" then return false end
+    if not ns.EVENT_INFO[kind] or not t or not ValidLayer(layer) then return false end
+    if t < ns.Now() - 14 * 86400 then return false end
     local def = ns.LookupAny(id, name)
     if not def then return false end
     if not def.id and id then def.id = id; ns.RebuildIndex() end
@@ -1042,20 +1132,28 @@ local function OnAddonMessage(prefix, msg, _, sender)
     local tag, ver, a, b, c, d, e = strsplit(":", msg)
     if ver ~= PROTO then return end
     local peer = ns.peers[who]
-    if peer then peer.t = GetTime() else ns.peers[who] = { t = GetTime() } end
+    if peer then peer.t = GetTime() else peer = { t = GetTime() }; ns.peers[who] = peer end
+    -- one sender can't flood us: a burst of 40 messages, then 2 per second
+    local now = GetTime()
+    peer.tok = math.min(40, (peer.tok or 40) + (now - (peer.tt or now)) * 2)
+    peer.tt = now
+    if peer.tok < 1 then return end
+    peer.tok = peer.tok - 1
 
     if tag == "E" then
         local id = tonumber(a)
         if id == 0 then id = nil end
-        if ApplyRemote(id, b, c, d, tonumber(e), who) then ns.Changed() end
+        if ApplyRemote(id, b, c, d, tonumber(e), who) then ns.ChangedSoon() end
     elseif tag == "B" then
         local body = msg:match("^B:[^:]+:(.*)$") or ""
-        local changed = false
+        local changed, items = false, 0
         for item in body:gmatch("[^;]+") do
+            items = items + 1
+            if items > 30 then break end
             local id, code, layer, t = strsplit("/", item)
             if ApplyRemote(tonumber(id), nil, CODE_KIND[code or ""], layer, tonumber(t), who) then changed = true end
         end
-        if changed then ns.Changed() end
+        if changed then ns.ChangedSoon() end
     elseif tag == "H" then
         local version, theirHash = a, tonumber(c)
         ns.peers[who].v = version
@@ -1069,14 +1167,14 @@ local function OnAddonMessage(prefix, msg, _, sender)
             SchedulePush()
             if GetTime() - lastHello > 30 then C_Timer.After(1 + math.random() * 3, SendHello) end
         end
-        ns.Changed()
+        ns.ChangedSoon()
     elseif tag == "C" then
         local id, t = tonumber(a), tonumber(b)
         if id and t and t <= ns.Now() + 120 and ns.RARE_DB and ns.RARE_DB[id] then
             if not ns.db.confirmed[id] or ns.db.confirmed[id] < t then
                 local first = not ns.db.confirmed[id]
                 ns.db.confirmed[id] = t
-                if first then ns.Changed() end
+                if first then ns.ChangedSoon() end
             end
         end
     elseif tag == "D" then
@@ -1084,20 +1182,28 @@ local function OnAddonMessage(prefix, msg, _, sender)
         id, t = tonumber(id), tonumber(t)
         if not id or not t or not name or name == "" or t > ns.Now() + 120 then return end
         if class ~= "rare" and class ~= "rareelite" then return end
+        if id < 1 or id > 10000000 or #name > 40 then return end
         if ns.RARE_DB and ns.RARE_DB[id] then
             if not ns.db.confirmed[id] or ns.db.confirmed[id] < t then ns.db.confirmed[id] = t end
             return
         end
         local dd = ns.db.discovered[id]
         if not dd then
+            -- new rares are rare: cap how many one player can add, and how many we keep in total
+            if (ns.Now() - (peer.dWin or 0)) > 600 then peer.dWin, peer.dN = ns.Now(), 0 end
+            peer.dN = (peer.dN or 0) + 1
+            if peer.dN > 5 then return end
+            local count = 0
+            for _ in pairs(ns.db.discovered) do count = count + 1 end
+            if count >= MAX_DISCOVERED then return end
             x, y = tonumber(x), tonumber(y)
-            dd = { n = name, c = class, lv = tonumber(lv), z = (zone ~= "?" and zone) or nil, ui = tonumber(ui),
+            dd = { n = name, c = class, lv = math.min(tonumber(lv) or 0, 90), z = (zone ~= "?" and zone and zone:sub(1, 40)) or nil, ui = tonumber(ui),
                 x = (x and x > 0) and x or nil, y = (y and y > 0) and y or nil, first = t, last = t, src = who }
             if dd.ui == 0 then dd.ui = nil end
             ns.db.discovered[id] = dd
             AddDiscoveredInfo(id, dd)
             ns.Print(who .. " found a new rare: " .. name .. (dd.z and (" in " .. dd.z) or "") .. ".")
-            ns.Changed()
+            ns.ChangedSoon()
         elseif t > (dd.last or 0) then
             dd.last = t
         end
@@ -1162,19 +1268,54 @@ SlashCmdList.RAREWATCH = function(input)
 end
 
 ---------------------------------------------------------------------------
+-- Housekeeping
+---------------------------------------------------------------------------
+-- Known rares on nameplates: a dead one means a kill we can log.
+function ns.PollNameplates()
+    for unit in pairs(ns.watched) do
+        if not UnitExists(unit) then
+            ns.watched[unit] = nil
+        elseif UnitIsDead(unit) then
+            CheckUnit(unit)
+            ns.watched[unit] = nil
+        end
+    end
+end
+
+local function Size(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
+
+-- Every ten minutes: drop expired records, and keep this session's memory of mobs seen from growing forever.
+function ns.Housekeeping()
+    if not ns.db then return end
+    local t = ns.Now()
+    for _, def in pairs(ns.db.mobs) do ns.PruneDef(def, t) end
+    for id, def in pairs(ns.db.shadow) do
+        ns.PruneDef(def, t)
+        if next(def.layers) == nil and not def.samples then ns.db.shadow[id] = nil end
+    end
+    ns.BumpDigest()
+    if Size(alerted) > 500 then wipe(alerted) end
+    if Size(deadSeen) > 500 then wipe(deadSeen) end
+    ns.Changed()
+end
+
+---------------------------------------------------------------------------
 -- Events
 ---------------------------------------------------------------------------
 local ev = CreateFrame("Frame")
 for _, e in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "NAME_PLATE_UNIT_ADDED",
-    "PLAYER_TARGET_CHANGED", "UPDATE_MOUSEOVER_UNIT", "UNIT_TARGET", "UNIT_PET", "CHAT_MSG_ADDON",
+    "NAME_PLATE_UNIT_REMOVED", "PLAYER_TARGET_CHANGED", "UPDATE_MOUSEOVER_UNIT", "UNIT_TARGET", "UNIT_PET", "CHAT_MSG_ADDON",
     "ADDON_ACTION_FORBIDDEN", "ADDON_ACTION_BLOCKED" }) do
     ev:RegisterEvent(e)
 end
 -- Not registered: this client blocks addons from the combat log, and the attempt itself
 -- triggers a "blocked from an action" warning. Kills are detected from dead units instead.
 ns.noCombatLog = true
-pcall(ev.RegisterEvent, ev, "UNIT_HEALTH")
-pcall(ev.RegisterEvent, ev, "UNIT_HEALTH_FREQUENT")
+-- Health events only for the units we can act on. Listening to every unit's health fires hundreds of times a
+-- second in a busy area; nameplates are polled instead (see the ticker below).
+if not (ev.RegisterUnitEvent and pcall(ev.RegisterUnitEvent, ev, "UNIT_HEALTH", "target", "mouseover")) then
+    pcall(ev.RegisterEvent, ev, "UNIT_HEALTH")
+end
 
 local entered = false
 ev:SetScript("OnEvent", function(_, event, ...)
@@ -1190,6 +1331,8 @@ ev:SetScript("OnEvent", function(_, event, ...)
         C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
         C_Timer.NewTicker(0.25, Pump)
         C_Timer.NewTicker(5, CheckWindows)
+        C_Timer.NewTicker(0.5, ns.PollNameplates)
+        C_Timer.NewTicker(600, ns.Housekeeping)
         ns.BuildUI()
         ns.Print("v" .. ns.VERSION .. " loaded - /rwatch to open.")
     elseif event == "PLAYER_ENTERING_WORLD" then
@@ -1232,9 +1375,11 @@ ev:SetScript("OnEvent", function(_, event, ...)
             ns.cleuErrors = (ns.cleuErrors or 0) + 1
             ns.cleuLastError = tostring(err)
         end
-    elseif event == "UNIT_HEALTH" or event == "UNIT_HEALTH_FREQUENT" then
+    elseif event == "NAME_PLATE_UNIT_REMOVED" then
+        ns.watched[(...)] = nil
+    elseif event == "UNIT_HEALTH" then
         local unit = ...
-        if unit and not InInstance() and (unit == "target" or unit == "mouseover" or unit:find("^nameplate%d")) and UnitIsDead(unit) then
+        if unit and (unit == "target" or unit == "mouseover" or ns.watched[unit]) and UnitIsDead(unit) then
             CheckUnit(unit)
         end
     elseif event == "CHAT_MSG_ADDON" then

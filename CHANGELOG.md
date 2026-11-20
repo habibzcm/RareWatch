@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.2
+- Fixed: your current layer is now always shown on a rare's page, even when its last kill is old. Before, a kill older than 48 hours vanished from the list, so a rare you killed 3 days ago on your layer showed nothing. If nobody has reported that layer yet you get a "no reports yet" row.
+- Timer history now scales with each rare's respawn time instead of a fixed 72 hours. Long-respawn rares keep their records for days (up to 14); shown records last about twice the respawn.
+- Sharing hardening: messages from other players are validated (layer, age, size), rate limited per sender, and capped, so one bad or spammy client cannot flood or bloat your data.
+- Less CPU: health events are only watched for your target and mouseover, nameplates are polled lightly, and window refreshes from incoming data are batched.
+- Old data is cleaned up periodically, with caps on layers per rare, history entries and discovered rares.
+
 ## 0.6.1
 - Fixed the "Blocked by the game: UNKNOWN()" spam in chat when using abilities or cooldowns in combat with the RareWatch window open. The window no longer changes the game's key-passing setting during combat.
 
