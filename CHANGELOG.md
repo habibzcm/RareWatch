@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.5
+- **Sharing is back on game build 71037 and later.** Other RareWatch users' kills, tames and sightings show again in the Tracking and History tabs, and you get the chat alerts again.
+- Layer numbers can't be matched between players on these builds, so a shared report shows the layer **as that player sees it**, e.g. "C (Bob's)". Their letter is not necessarily your letter, so use it as a hint about when and roughly where, not as a timer for your own layer. Timers for your own layer still come only from what you see.
+- Reports from older RareWatch versions, which carry raw numbers, show as "unknown layer".
+- Fixed History showing the same kill many times (once per player or layer that reported it). One kill within about 2 minutes is now one entry, and duplicates already saved are merged when you log in.
+- History is now always in the order things happened (newest first), even when another player reports an older kill late. New search box on the History tab filters by rare, player or layer.
+- Settings no longer says sharing is paused, and the sharing switches work normally again.
+
 ## 0.6.4
 - **Layers on game build 71037 and later.** The game now gives every creature its own numbers, so a creature's number no longer names a layer (two creatures side by side differ in both the server and zone parts). RareWatch used to show those raw numbers as "your layer", which is why it changed from one creature to the next.
 - Your layer is now read once from the first creature that is not a pet or totem, shown as a letter (A, B, C, in the order you have been on them this login) with the raw number under it, and held. It is read again only when the game moves you (`SHARD_TRANSFER`), you cross a zone border, or you log in. Creatures that were in view at a move or a border are ignored, since they belong to the layer or zone you just left. A `/reload` keeps your layer.

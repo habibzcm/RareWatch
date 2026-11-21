@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.6.4"
+ns.VERSION = "0.6.5"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -133,17 +133,29 @@ local function LetterOf(id)
     return ns.db and ns.db.letters and ns.db.letters[id]
 end
 
-function ns.LayerName(id)
-    if not id or id == "?" then return "?" end
+-- "<player>.<letter>": another player's layer as they see it (letters are per player, so this is not your layer)
+local function Theirs(id)
+    if ns.Private() and type(id) == "string" then
+        local who, l = id:match("^([%w_%-]+)%.([%w_%-]+)$")
+        if who then return who, l end
+    end
+end
+
+function ns.LayerName(id, long)
+    if not id or id == "?" then return "unknown layer" end
+    local who, l = Theirs(id)
+    if who then return (long and "layer " or "") .. l .. " (" .. who .. "'s)" end
     local label = ns.db and ns.db.layerNames[id]
-    if label then return label .. " (" .. id .. ")" end
+    if label then return (long and "layer " or "") .. label .. " (" .. id .. ")" end
     local letter = LetterOf(id)
-    if letter then return letter .. " (" .. id .. ")" end
-    return tostring(id)
+    if letter then return (long and "layer " or "") .. letter .. " (" .. id .. ")" end
+    return (long and "layer " or "") .. tostring(id)
 end
 
 function ns.LayerShort(id)
-    if not id or id == "?" then return "?" end
+    if not id or id == "?" then return "unknown" end
+    local who, l = Theirs(id)
+    if who then return l .. " (" .. who .. "'s)" end
     return (ns.db and ns.db.layerNames[id]) or LetterOf(id) or tostring(id)
 end
 
@@ -308,9 +320,35 @@ function ns.GetRec(def, layer)
     return r
 end
 
+-- The same kill reported again (another player, another layer label) is one history entry.
+local function InHistory(h, name, kind, t)
+    for i = 1, math.min(#h, 60) do
+        local e = h[i]
+        if e.n == name and e.k == kind and math.abs((e.t or 0) - t) < 120 then return true end
+    end
+    return false
+end
+
+-- Merge duplicates already saved (keeps the first, newest-first list).
+function ns.DedupeHistory()
+    local h, out = ns.db.history, {}
+    table.sort(h, function(x, y) return (x.t or 0) > (y.t or 0) end)
+    for _, e in ipairs(h) do
+        local dup = false
+        for j = #out, math.max(1, #out - 80), -1 do
+            local o = out[j]
+            if o.n == e.n and o.k == e.k and math.abs((o.t or 0) - (e.t or 0)) < 120 then dup = true; break end
+        end
+        if not dup then out[#out + 1] = e end
+    end
+    ns.db.history = out
+end
+
 local function AddHistory(def, kind, layer, t, src)
     local h = ns.db.history
+    if InHistory(h, def.name, kind, t) then return end
     table.insert(h, 1, { t = t, k = kind, l = layer, s = src, n = def.name })
+    table.sort(h, function(x, y) return (x.t or 0) > (y.t or 0) end)
     for i = #h, HISTORY_MAX + 1, -1 do h[i] = nil end
 end
 
@@ -364,6 +402,7 @@ function ns.InitDB()
     db.layerNames = db.layerNames or {}
     db.letters = db.letters or {}      -- layer id -> letter, for this login (private-number builds)
     db.discovered = db.discovered or {}
+    if db.history and #db.history > 1 then ns.DedupeHistory() end
     db.confirmed = db.confirmed or {}
     db.shadow = db.shadow or {}
 
@@ -624,7 +663,6 @@ local CODE_KIND = { D = "DOWN", T = "TAME", S = "SEEN", P = "SPAWN" }
 
 local function Destinations()
     local d = {}
-    if ns.Private() then return d end      -- sharing is paused: layers cannot be matched between players
     if ns.opt.shareGuild and IsInGuild() then d[#d + 1] = { "GUILD" } end
     local id = GetChannelName(CHANNEL)
     if id and id > 0 then d[#d + 1] = { "CHANNEL", id } end
@@ -659,7 +697,17 @@ local function Send(msg, urgent)
     if urgent then table.insert(queue, 1, msg) else table.insert(queue, msg) end
 end
 
+-- On private-number builds a layer can't be matched between players, so what travels is the layer as its owner
+-- sees it: "<player>.<letter>". Keys that already have that shape (relayed from someone else) pass unchanged.
+local function ShareKey(layer)
+    if not ns.Private() or not layer or layer == "?" or layer:find(".", 1, true) then return layer end
+    local label = tostring(ns.LayerShort(layer)):gsub("[^%w_%-]", ""):sub(1, 8)
+    local who = (ns.me or "me"):gsub("[^%w_%-]", ""):sub(1, 12)
+    return who .. "." .. (label ~= "" and label or "?")
+end
+
 local function Broadcast(def, kind, layer, t, urgent)
+    layer = ShareKey(layer)
     Send(table.concat({ "E", PROTO, def.id or 0, def.name, kind, layer or "?", math.floor(t) }, ":"), urgent)
 end
 
@@ -670,13 +718,14 @@ end
 -- Everything worth passing on right now: { def, kind, layer, time, record }.
 local function Shareable(t)
     local out = {}
+    local function add(def, kind, layer, when, r) out[#out + 1] = { def, kind, layer, when, r } end
     for _, def in ipairs(ns.AllDefs()) do
         for layer, r in pairs(def.layers) do
             local info = ns.RareInfo(def.id)
             local win = math.min(7 * 86400, math.max(def.max or 0, info and info.rmax or 0)) + 6 * 3600
-            if r.down and t - r.down < win then out[#out + 1] = { def, r.downKind or "DOWN", layer, r.down, r } end
-            if r.spawn and t - r.spawn < 24 * 3600 then out[#out + 1] = { def, "SPAWN", layer, r.spawn, r } end
-            if r.seen and t - r.seen < 6 * 3600 then out[#out + 1] = { def, "SEEN", layer, r.seen, r } end
+            if r.down and t - r.down < win then add(def, r.downKind or "DOWN", layer, r.down, r) end
+            if r.spawn and t - r.spawn < 24 * 3600 then add(def, "SPAWN", layer, r.spawn, r) end
+            if r.seen and t - r.seen < 6 * 3600 then add(def, "SEEN", layer, r.seen, r) end
         end
     end
     return out
@@ -704,7 +753,7 @@ function ns.Digest()
             local info = ns.RareInfo(e[1].id)
             local win = math.min(7 * 86400, (info and info.rmax) or (12 * 3600)) + 6 * 3600
             if t - e[4] < win then
-                keys[#keys + 1] = (e[1].id or e[1].name) .. "/" .. e[3] .. "/" .. KIND_CODE[e[2]] .. "/" .. math.floor(e[4] / 600)
+                keys[#keys + 1] = (e[1].id or e[1].name) .. "/" .. ShareKey(e[3]) .. "/" .. KIND_CODE[e[2]] .. "/" .. math.floor(e[4] / 600)
             end
         end
     end
@@ -747,7 +796,7 @@ local function Push(since)
         local e = list[i]
         local def = e[1]
         if def.id then
-            local item = def.id .. "/" .. KIND_CODE[e[2]] .. "/" .. e[3] .. "/" .. math.floor(e[4])
+            local item = def.id .. "/" .. KIND_CODE[e[2]] .. "/" .. ShareKey(e[3]) .. "/" .. math.floor(e[4])
             if len + #item + 1 > 225 then flush() end
             batch[#batch + 1] = item
             len = len + #item + 1
@@ -817,11 +866,6 @@ function ns.HideChannel() end
 -- After the first join the game keeps you in the channel on every login.
 function ns.SetChannel(on)
     ns.opt.channelConsent = on and true or false
-    if on and ns.Private() then
-        ns.Print("Sharing is paused on this game build: creatures carry their own layer numbers, so layers can't be matched between players.")
-        ns.Changed()
-        return
-    end
     if on then
         if GetChannelName(CHANNEL) == 0 then JoinPermanentChannel(CHANNEL) end
     else
@@ -838,7 +882,7 @@ end
 
 -- Called from click/key-press handlers: quietly rejoin if the player agreed to share before.
 function ns.EnsureChannel()
-    if ns.opt and ns.opt.channelConsent and GetChannelName(CHANNEL) == 0 and not ns.joining and not ns.Private() then
+    if ns.opt and ns.opt.channelConsent and GetChannelName(CHANNEL) == 0 and not ns.joining then
         ns.joining = true
         JoinPermanentChannel(CHANNEL)
         C_Timer.After(1.5, function()
@@ -1269,11 +1313,12 @@ end
 
 -- One event from another player (tracked or not). Returns true if it changed anything.
 local function ValidLayer(l)
-    return type(l) == "string" and #l <= 12 and (l == "?" or l:match("^[%w%._%-]+$") ~= nil)
+    return type(l) == "string" and #l <= 24 and (l == "?" or l:match("^[%w%._%-]+$") ~= nil)
 end
 
 local function ApplyRemote(id, name, kind, layer, t, who)
     if not ns.EVENT_INFO[kind] or not t or not ValidLayer(layer) then return false end
+    if ns.Private() and not layer:match("^[%w_%-]+%.[%w_%-]+$") then layer = "?" end   -- only "<player>.<letter>" is understood here
     if t < ns.Now() - 14 * 86400 then return false end
     local def = ns.LookupAny(id, name)
     if not def then return false end
@@ -1284,10 +1329,10 @@ local function ApplyRemote(id, name, kind, layer, t, who)
         local age = ns.Now() - t
         if (kind == "SEEN" or kind == "SPAWN") and age < 600 then
             if ns.opt.shareAlerts and def.alert then ns.PlayAlertSound() end
-            ns.Print(string.format("%s reports %s UP on layer %s.", who, def.name, ns.LayerName(layer)))
+            ns.Print(string.format("%s reports %s UP%s.", who, def.name, " on " .. ns.LayerName(layer, true)))
         elseif (kind == "DOWN" or kind == "TAME") and age < 3600 then
-            ns.Print(string.format("%s reports %s %s on layer %s (%s ago).", who, def.name,
-                kind == "TAME" and "tamed" or "killed", ns.LayerName(layer), ns.Dur(age)))
+            ns.Print(string.format("%s reports %s %s%s (%s ago).", who, def.name,
+                kind == "TAME" and "tamed" or "killed", " on " .. ns.LayerName(layer, true), ns.Dur(age)))
         end
     end
     return changed
@@ -1295,7 +1340,6 @@ end
 
 local function OnAddonMessage(prefix, msg, _, sender)
     if prefix ~= PREFIX or not sender then return end
-    if ns.Private() then return end
     if sender == ns.me or sender == ns.meFull then return end
     local who = Ambiguate(sender, "short")
     local tag, ver, a, b, c, d, e = strsplit(":", msg)
@@ -1521,11 +1565,6 @@ ev:SetScript("OnEvent", function(_, event, ...)
         if not entered then
             entered = true
             C_Timer.After(10, function()
-                if ns.Private() then
-                    if GetChannelName(CHANNEL) > 0 then LeaveChannelByName(CHANNEL) end   -- nothing to share, so nobody sees us there
-                    ns.Changed()
-                    return
-                end
                 if GetChannelName(CHANNEL) > 0 then
                     ns.HideChannel()
                     if ns.opt.channelConsent == nil then ns.opt.channelConsent = true end -- joined in an older version

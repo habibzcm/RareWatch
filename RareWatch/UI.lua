@@ -522,9 +522,7 @@ local function BuildTracker(page)
         headCount:SetText(#mobs > 0 and tostring(#mobs) or "")
         local online = ns.OnlineUsers()
         local syncText
-        if ns.Private() then
-            syncText = Hex(C.orange) .. "Sharing paused|r"
-        elseif GetChannelName(ns.CHANNEL) > 0 or ns.IsSharing() then
+        if GetChannelName(ns.CHANNEL) > 0 or ns.IsSharing() then
             syncText = Hex(C.accent) .. "Live|r" .. DOT .. (online == 1 and "1 other user online" or (online .. " other users online"))
         else
             syncText = Hex(C.orange) .. "Not connected|r - click Connect in Settings"
@@ -866,6 +864,11 @@ local function BuildHistory(page)
     end)
     clear:SetPoint("TOPRIGHT", -56, -16)
 
+    local search = W.Edit(page, 200, 30, "Search rare, player or layer")
+    search:SetPoint("RIGHT", clear, "LEFT", -10, 0)
+    local sIcon = W.Icon(search, "search", 14, C.muted)
+    sIcon:SetPoint("RIGHT", -10, 0)
+
     local list = W.List(page, CH - 70 - 12, 36, function(lst)
         local r = CreateFrame("Frame", nil, lst)
         r.dot = W.Dot(r, 7)
@@ -897,11 +900,32 @@ local function BuildHistory(page)
     list:SetPoint("TOPLEFT", 8, -70)
     list:SetPoint("TOPRIGHT", -12, -70)
 
+    -- newest event first, by when it happened (not by when it reached us)
+    local function Newest(a, b) return (a.t or 0) > (b.t or 0) end
     refreshers[3] = function()
-        local n = #ns.db.history
-        count:SetText(n > 0 and (n .. (n == 1 and " event" or " events")) or "")
-        list:SetData(ns.db.history, "Nothing yet. Kills, tames and sightings from you\nand other RareWatch users are listed here.")
+        local all = ns.db.history
+        local q = strtrim(search:GetText() or ""):lower()
+        local out = {}
+        for _, h in ipairs(all) do
+            if q == "" then
+                out[#out + 1] = h
+            else
+                local e = EVENTS[h.k]
+                local hay = ((h.n or "") .. " " .. (h.s or "") .. " " .. ns.LayerName(h.l) .. " " .. (e and e.label or "")):lower()
+                if hay:find(q, 1, true) then out[#out + 1] = h end
+            end
+        end
+        table.sort(out, Newest)
+        local n = #all
+        if q == "" then
+            count:SetText(n > 0 and (n .. (n == 1 and " event" or " events")) or "")
+        else
+            count:SetText(#out .. " of " .. n)
+        end
+        list:SetData(out, q == "" and "Nothing yet. Kills, tames and sightings from you\nand other RareWatch users are listed here."
+            or "No events match your search.")
     end
+    search.onChange = function() if refreshers[3] then refreshers[3]() end end
 end
 
 ---------------------------------------------------------------------------
@@ -980,7 +1004,7 @@ local function BuildSettings(page)
         function(v) o.windowScale = v; main:SetScale(v) end, 0.7, 1.4, 0.1, pct))
 
     -- column 2
-    Section(2, ns.Private() and "Sharing (paused)" or "Sharing")
+    Section(2, "Sharing")
     Row(2, "Share with my guild", Opt("shareGuild"))
     Row(2, "Share with RareWatch users", W.Switch(page, function() return GetChannelName(ns.CHANNEL) > 0 end,
         function(v) ns.SetChannel(v) end),
@@ -988,7 +1012,7 @@ local function BuildSettings(page)
     Row(2, "Share with my group", Opt("shareGroup"), "Also share with your party or raid.")
     local onlineRow = Row(2, "Users online", W.Button(page, { text = "Resync", icon = "refresh", h = 24, size = 11,
         onClick = function() ns.SyncNow() end }),
-        ns.Private() and "Sharing is paused on this game build. Creatures now carry their own layer numbers, so a layer can't be matched between players. Your own timers keep working."
+        ns.Private() and "Syncing is automatic. Resync just does it right now. On this game build layers can't be matched between players, so a report shows the layer as that player sees it, like \"C (Bob's)\"."
             or "Syncing is automatic. Resync just does it right now.")
 
     ns.settingsOnlineRow = onlineRow
