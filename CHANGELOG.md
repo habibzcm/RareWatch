@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.4
+- **Layers on game build 71037 and later.** The game now gives every creature its own numbers, so a creature's number no longer names a layer (two creatures side by side differ in both the server and zone parts). RareWatch used to show those raw numbers as "your layer", which is why it changed from one creature to the next.
+- Your layer is now read once from the first creature that is not a pet or totem, shown as a letter (A, B, C, in the order you have been on them this login) with the raw number under it, and held. It is read again only when the game moves you (`SHARD_TRANSFER`), you cross a zone border, or you log in. Creatures that were in view at a move or a border are ignored, since they belong to the layer or zone you just left. A `/reload` keeps your layer.
+- Kills, sightings and tames are filed under the layer you are holding, not under the creature's own number.
+- **Sharing is paused on these builds.** Layer numbers cannot be matched between players, so nothing is sent and incoming data is ignored. Settings and the footer say so. Your own timers keep working. Older builds are unchanged.
+- Because of the new numbers, a layer you return to after a move counts as a new letter, and timers kept from before the patch no longer line up with your current layer.
+
 ## 0.6.3
 - Fixed the empty Tracking page: the stray "Drops" tab no longer shows when nothing is tracked, and the hint text and Browse button are centred without cutting off words.
 

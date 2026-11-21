@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.6.3"
+ns.VERSION = "0.6.4"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -77,12 +77,40 @@ local function Key(name) return strtrim(name or ""):lower() end
 local AddSample -- defined in the rare-database section below
 ns.Key = Key
 
+-- From game build 71037 (20 Nov 2026) every creature carries numbers of its own in its GUID: two creatures
+-- standing side by side differ in both the server and the zone part, so no creature number names a layer.
+-- In that mode the layer is read once, held, and only read again when the game moves the player.
+ns.PRIVATE_BUILD = 71037
+local privateMode
+function ns.Private()
+    if privateMode == nil then
+        privateMode = false
+        if type(GetBuildInfo) == "function" then
+            local ok, _, build = pcall(GetBuildInfo)
+            privateMode = (ok and (tonumber(build) or 0) >= ns.PRIVATE_BUILD) and true or false
+        end
+    end
+    return privateMode
+end
+ns.SharingPaused = ns.Private
+
 -- Creature-0-serverID-instanceID-zoneUID-npcID-spawnUID
+-- Returns the npc id, the layer the creature counts for, and the spawn part. On builds where creature numbers
+-- are private the layer is the one the player is holding, not the creature's own number.
 function ns.ParseGUID(guid)
     if not guid then return end
     local unitType, _, _, _, zoneUID, npcID, spawnUID = strsplit("-", guid)
     if unitType ~= "Creature" and unitType ~= "Vehicle" then return end
+    if ns.Private() then return tonumber(npcID), ns.currentLayer, spawnUID end
     return tonumber(npcID), zoneUID, spawnUID
+end
+
+-- The numbers a creature carries, as the id a reading is held under.
+function ns.RawLayer(guid)
+    if not guid then return end
+    local unitType, _, server, _, zoneUID = strsplit("-", guid)
+    if (unitType ~= "Creature" and unitType ~= "Vehicle") or not server or not zoneUID then return end
+    return server .. "-" .. zoneUID
 end
 
 -- Low 23 bits of the spawn UID = spawn time (server epoch mod 2^23). Experimental.
@@ -101,16 +129,22 @@ end
 ---------------------------------------------------------------------------
 -- Layers: the game gives a numeric ID; users can attach their own label.
 ---------------------------------------------------------------------------
+local function LetterOf(id)
+    return ns.db and ns.db.letters and ns.db.letters[id]
+end
+
 function ns.LayerName(id)
     if not id or id == "?" then return "?" end
     local label = ns.db and ns.db.layerNames[id]
     if label then return label .. " (" .. id .. ")" end
+    local letter = LetterOf(id)
+    if letter then return letter .. " (" .. id .. ")" end
     return tostring(id)
 end
 
 function ns.LayerShort(id)
     if not id or id == "?" then return "?" end
-    return (ns.db and ns.db.layerNames[id]) or tostring(id)
+    return (ns.db and ns.db.layerNames[id]) or LetterOf(id) or tostring(id)
 end
 
 -- Turn user input (an ID or a label they assigned) into a layer ID.
@@ -119,6 +153,9 @@ function ns.ResolveLayer(input)
     if input == "" then return nil end
     for id, label in pairs(ns.db.layerNames) do
         if label:lower() == input:lower() then return id end
+    end
+    for id, letter in pairs(ns.db.letters or {}) do
+        if tostring(letter):lower() == input:lower() then return id end
     end
     return input
 end
@@ -325,6 +362,7 @@ function ns.InitDB()
     ns.opt = db.opt
     db.history = db.history or {}
     db.layerNames = db.layerNames or {}
+    db.letters = db.letters or {}      -- layer id -> letter, for this login (private-number builds)
     db.discovered = db.discovered or {}
     db.confirmed = db.confirmed or {}
     db.shadow = db.shadow or {}
@@ -586,6 +624,7 @@ local CODE_KIND = { D = "DOWN", T = "TAME", S = "SEEN", P = "SPAWN" }
 
 local function Destinations()
     local d = {}
+    if ns.Private() then return d end      -- sharing is paused: layers cannot be matched between players
     if ns.opt.shareGuild and IsInGuild() then d[#d + 1] = { "GUILD" } end
     local id = GetChannelName(CHANNEL)
     if id and id > 0 then d[#d + 1] = { "CHANNEL", id } end
@@ -778,6 +817,11 @@ function ns.HideChannel() end
 -- After the first join the game keeps you in the channel on every login.
 function ns.SetChannel(on)
     ns.opt.channelConsent = on and true or false
+    if on and ns.Private() then
+        ns.Print("Sharing is paused on this game build: creatures carry their own layer numbers, so layers can't be matched between players.")
+        ns.Changed()
+        return
+    end
     if on then
         if GetChannelName(CHANNEL) == 0 then JoinPermanentChannel(CHANNEL) end
     else
@@ -794,7 +838,7 @@ end
 
 -- Called from click/key-press handlers: quietly rejoin if the player agreed to share before.
 function ns.EnsureChannel()
-    if ns.opt and ns.opt.channelConsent and GetChannelName(CHANNEL) == 0 and not ns.joining then
+    if ns.opt and ns.opt.channelConsent and GetChannelName(CHANNEL) == 0 and not ns.joining and not ns.Private() then
         ns.joining = true
         JoinPermanentChannel(CHANNEL)
         C_Timer.After(1.5, function()
@@ -901,6 +945,124 @@ local function SetCurrentLayer(layer)
     end
 end
 
+-- Private-number builds (see ns.Private). How a layer is known there, following what the game tells us:
+--   * a creature read when nothing is held sets the layer, and it is then held: later creatures never replace it;
+--   * SHARD_TRANSFER (the game moved the player) and ZONE_CHANGED_NEW_AREA (a zone border) make it unknown again;
+--   * creatures that were in view at such a moment belong to the layer or zone just left, so they are not read;
+--     after a move a creature that was NOT in view counts once SHARD_QUIET has passed, any creature after STALE_FOR;
+--     after a border nothing is read for BORDER_QUIET;
+--   * a /reload keeps the layer (saved at logout, restored within KEPT_AGE seconds); a login starts from nothing.
+ns.layerStale = true
+local SHARD_QUIET, STALE_FOR, BORDER_QUIET, KEPT_AGE = 3, 10, 15, 120
+local shardAt, borderAt, loginAt = -1000, -1000, GetTime()
+local shardSeen, borderSeen = {}, {}
+local lastTouch = 0
+
+local function LetterFor(n)
+    if n <= 26 then return string.char(64 + n) end
+    return tostring(n)
+end
+
+-- Every creature unit the client shows right now, by GUID.
+local function InView()
+    local seen = {}
+    local function add(unit)
+        local ok, g = pcall(UnitGUID, unit)
+        if ok and type(g) == "string" and not (issecretvalue and issecretvalue(g)) then seen[g] = true end
+    end
+    for i = 1, 40 do add("nameplate" .. i) end
+    add("target"); add("mouseover")
+    return seen
+end
+
+local function Adopt(id)
+    local map = PlayerMap()
+    ns.layerStale = false
+    if map then ns.layerByMap[map] = id end
+    if not ns.db.letters[id] then
+        ns.db.letterN = (ns.db.letterN or 0) + 1
+        ns.db.letters[id] = LetterFor(ns.db.letterN)
+    end
+    if id ~= ns.currentLayer then
+        ns.currentLayer = id
+        ns.currentLayerZone = GetRealZoneText and GetRealZoneText() or nil
+        ns.Changed()
+    end
+end
+
+-- Returns true when a layer is held and may be used for this creature's record.
+function ns.ReadLayer(unit, guid)
+    if ns.currentLayer and not ns.layerStale then return true end
+    local now = GetTime()
+    local sinceShard = now - shardAt
+    local calm = (sinceShard >= STALE_FOR or (sinceShard >= SHARD_QUIET and not shardSeen[guid]))
+        and now - borderAt >= BORDER_QUIET and not borderSeen[guid]
+    if not calm then return false end
+    -- a player's own summons carry the place they were made, not the player's layer
+    if type(UnitPlayerControlled) == "function" then
+        local ok, pc = pcall(function() return UnitPlayerControlled(unit) == true end)
+        if ok and pc then return false end
+    end
+    local id = ns.RawLayer(guid)
+    if not id then return false end
+    Adopt(id)
+    return true
+end
+
+local function Forget()
+    ns.currentLayer, ns.layerStale = nil, true
+    ns.Changed()
+end
+
+-- The game moved the player to another layer.
+function ns.LayerMoved()
+    shardAt, shardSeen = GetTime(), InView()
+    Forget()
+end
+
+-- A zone border: the world around the player is another zone's now. Within seconds of a login it is no border.
+function ns.LayerBorder()
+    if GetTime() - loginAt >= 10 then
+        borderAt, borderSeen = GetTime(), InView()
+    end
+    Forget()
+end
+
+-- Saved when the interface is torn down, so a /reload can pick the layer up again.
+function ns.LayerSave()
+    ns.db.held = ns.currentLayer and { id = ns.currentLayer, zone = GetRealZoneText and GetRealZoneText() or nil,
+        at = time(), who = ns.me } or nil
+end
+
+local function Restore()
+    local k = ns.db.held
+    if not k or ns.currentLayer then return end
+    if GetTime() - loginAt > 10 then ns.db.held = nil; return end
+    if type(k.at) ~= "number" or time() - k.at > KEPT_AGE or k.who ~= ns.me then ns.db.held = nil; return end
+    local zone = GetRealZoneText and GetRealZoneText()
+    if type(zone) ~= "string" or zone == "" or zone ~= k.zone then return end    -- not named yet: tried again
+    ns.currentLayer, ns.layerStale = k.id, false
+    ns.currentLayerZone = zone
+    local map = PlayerMap()
+    if map then ns.layerByMap[map] = k.id end
+    ns.Changed()
+end
+
+-- A loading screen. A login starts from nothing, a /reload keeps the layer, any other one changes nothing
+-- (a zone border or a move has its own event).
+function ns.LayerWorldEntered(isLogin, isReload)
+    if isLogin or isReload then loginAt = GetTime() end
+    if isLogin then
+        ns.currentLayer, ns.layerStale = nil, true
+        ns.db.held = nil
+        ns.db.letters, ns.db.letterN = {}, 0
+    elseif isReload then
+        ns.layerStale = ns.currentLayer == nil
+        Restore()
+        C_Timer.After(2, Restore)
+    end
+end
+
 -- Your layer in the zone where this mob lives (nil if you haven't been there this session).
 function ns.LayerFor(def)
     if not def then return nil end
@@ -998,7 +1160,13 @@ local function CheckUnit(unit)
     local guid = UnitGUID(unit)
     local npcId, layer, spawnUID = ns.ParseGUID(guid)
     if not npcId then return end
-    if not IsInInstance() then SetCurrentLayer(layer) end
+    if ns.Private() then
+        -- the layer is held, not read off every creature; with none held yet there is nothing to file a record under
+        if IsInInstance() or not ns.ReadLayer(unit, guid) then return end
+        layer = ns.currentLayer
+    elseif not IsInInstance() then
+        SetCurrentLayer(layer)
+    end
 
     if UnitIsDead(unit) then
         CheckDeath(unit, guid, npcId, layer)
@@ -1127,6 +1295,7 @@ end
 
 local function OnAddonMessage(prefix, msg, _, sender)
     if prefix ~= PREFIX or not sender then return end
+    if ns.Private() then return end
     if sender == ns.me or sender == ns.meFull then return end
     local who = Ambiguate(sender, "short")
     local tag, ver, a, b, c, d, e = strsplit(":", msg)
@@ -1308,6 +1477,9 @@ for _, e in ipairs({ "ADDON_LOADED", "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "N
     "ADDON_ACTION_FORBIDDEN", "ADDON_ACTION_BLOCKED" }) do
     ev:RegisterEvent(e)
 end
+for _, e in ipairs({ "SHARD_TRANSFER", "ZONE_CHANGED_NEW_AREA", "PLAYER_LOGOUT" }) do
+    pcall(ev.RegisterEvent, ev, e)   -- SHARD_TRANSFER is the game's own word for a layer move; not on every client
+end
 -- Not registered: this client blocks addons from the combat log, and the attempt itself
 -- triggers a "blocked from an action" warning. Kills are detected from dead units instead.
 ns.noCombatLog = true
@@ -1335,10 +1507,25 @@ ev:SetScript("OnEvent", function(_, event, ...)
         C_Timer.NewTicker(600, ns.Housekeeping)
         ns.BuildUI()
         ns.Print("v" .. ns.VERSION .. " loaded - /rwatch to open.")
+    elseif event == "SHARD_TRANSFER" then
+        if ns.Private() then ns.LayerMoved() end
+    elseif event == "ZONE_CHANGED_NEW_AREA" then
+        if ns.Private() then ns.LayerBorder() end
+    elseif event == "PLAYER_LOGOUT" then
+        if ns.Private() then ns.LayerSave() end
     elseif event == "PLAYER_ENTERING_WORLD" then
+        if ns.Private() then
+            local isLogin, isReload = ...
+            ns.LayerWorldEntered(isLogin == true, isReload == true)
+        end
         if not entered then
             entered = true
             C_Timer.After(10, function()
+                if ns.Private() then
+                    if GetChannelName(CHANNEL) > 0 then LeaveChannelByName(CHANNEL) end   -- nothing to share, so nobody sees us there
+                    ns.Changed()
+                    return
+                end
                 if GetChannelName(CHANNEL) > 0 then
                     ns.HideChannel()
                     if ns.opt.channelConsent == nil then ns.opt.channelConsent = true end -- joined in an older version

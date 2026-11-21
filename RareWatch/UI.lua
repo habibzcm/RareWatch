@@ -522,7 +522,9 @@ local function BuildTracker(page)
         headCount:SetText(#mobs > 0 and tostring(#mobs) or "")
         local online = ns.OnlineUsers()
         local syncText
-        if GetChannelName(ns.CHANNEL) > 0 or ns.IsSharing() then
+        if ns.Private() then
+            syncText = Hex(C.orange) .. "Sharing paused|r"
+        elseif GetChannelName(ns.CHANNEL) > 0 or ns.IsSharing() then
             syncText = Hex(C.accent) .. "Live|r" .. DOT .. (online == 1 and "1 other user online" or (online .. " other users online"))
         else
             syncText = Hex(C.orange) .. "Not connected|r - click Connect in Settings"
@@ -978,7 +980,7 @@ local function BuildSettings(page)
         function(v) o.windowScale = v; main:SetScale(v) end, 0.7, 1.4, 0.1, pct))
 
     -- column 2
-    Section(2, "Sharing")
+    Section(2, ns.Private() and "Sharing (paused)" or "Sharing")
     Row(2, "Share with my guild", Opt("shareGuild"))
     Row(2, "Share with RareWatch users", W.Switch(page, function() return GetChannelName(ns.CHANNEL) > 0 end,
         function(v) ns.SetChannel(v) end),
@@ -986,7 +988,8 @@ local function BuildSettings(page)
     Row(2, "Share with my group", Opt("shareGroup"), "Also share with your party or raid.")
     local onlineRow = Row(2, "Users online", W.Button(page, { text = "Resync", icon = "refresh", h = 24, size = 11,
         onClick = function() ns.SyncNow() end }),
-        "Syncing is automatic. Resync just does it right now.")
+        ns.Private() and "Sharing is paused on this game build. Creatures now carry their own layer numbers, so a layer can't be matched between players. Your own timers keep working."
+            or "Syncing is automatic. Resync just does it right now.")
 
     ns.settingsOnlineRow = onlineRow
     Section(2, "Layers")
