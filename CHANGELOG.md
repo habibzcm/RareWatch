@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.3
+- Fixed the empty Tracking page: the stray "Drops" tab no longer shows when nothing is tracked, and the hint text and Browse button are centred without cutting off words.
+
 ## 0.6.2
 - Fixed: your current layer is now always shown on a rare's page, even when its last kill is old. Before, a kill older than 48 hours vanished from the list, so a rare you killed 3 days ago on your layer showed nothing. If nobody has reported that layer yet you get a "no reports yet" row.
 - Timer history now scales with each rare's respawn time instead of a fixed 72 hours. Long-respawn rares keep their records for days (up to 14); shown records last about twice the respawn.

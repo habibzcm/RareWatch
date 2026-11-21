@@ -508,11 +508,13 @@ local function BuildTracker(page)
 
     local emptyHint = W.Text(d, 12, "R", "", C.muted, "CENTER")
     emptyHint:SetPoint("CENTER", 0, 20)
-    emptyHint:SetWidth(320)
+    emptyHint:SetWidth(400)
+    emptyHint:SetHeight(36)
+    emptyHint:SetJustifyV("TOP")
     local browseBtn = W.Button(d, { text = "Browse rares", icon = "search", style = "primary", onClick = function() ns.ShowPage(2) end })
     browseBtn:SetPoint("TOP", emptyHint, "BOTTOM", 0, -14)
     local detailParts = { name, meta, pill, heroLabel, hero, heroNote, tl, chip1, chip2, editResp, layersHead,
-        layerList, logKill, logSeen, waypoint, untrack, bell, feedback }
+        layerList, dropList, dropNote, tabDrops, logKill, logSeen, waypoint, untrack, bell, feedback }
 
     refreshers[1] = function()
         local mobs = SortedMobs()
