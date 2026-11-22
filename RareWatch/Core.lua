@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.6.7"
+ns.VERSION = "0.7.0-beta"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -25,7 +25,7 @@ local DEFAULT_OPT = {
     showTracker = true, lockTracker = false, trackerScale = 1.0, windowScale = 1.0,
     minimapHide = false, minimapAngle = 200,
     alertAnyRare = true, defaultMin = 6 * 3600, defaultMax = 24 * 3600, plainFont = false,
-    shareGroup = true,
+    shareGroup = true, hostJoin = true,
 }
 
 ns.COLORS = {
@@ -1030,6 +1030,8 @@ local function InView()
     return seen
 end
 
+ns.InView = InView
+
 local function Adopt(id)
     local map = PlayerMap()
     ns.layerStale = false
@@ -1354,7 +1356,7 @@ local function ApplyRemote(id, name, kind, layer, t, who)
     return changed
 end
 
-local function OnAddonMessage(prefix, msg, _, sender)
+local function OnAddonMessage(prefix, msg, channel, sender)
     if prefix ~= PREFIX or not sender then return end
     if sender == ns.me or sender == ns.meFull then return end
     local who = Ambiguate(sender, "short")
@@ -1369,7 +1371,9 @@ local function OnAddonMessage(prefix, msg, _, sender)
     if peer.tok < 1 then return end
     peer.tok = peer.tok - 1
 
-    if tag == "E" then
+    if tag == "J" or tag == "j" or tag == "Q" then
+        if ns.JoinMessage then ns.JoinMessage(tag, sender, channel, a, b, c, d, e) end
+    elseif tag == "E" then
         local id = tonumber(a)
         if id == 0 then id = nil end
         if ApplyRemote(id, b, c, d, tonumber(e), who) then ns.ChangedSoon() end
@@ -1454,6 +1458,7 @@ local HELP = {
     "/rwatch sync - resync with other users now (normally automatic)",
     "/rwatch test - test the alert",
     "/rwatch debug - show what RareWatch can detect on this client",
+    "/rwatch swaps - layer moves used this hour (join requests stop at 8 of about 10)",
 }
 
 SLASH_RAREWATCH1 = "/rwatch"
@@ -1491,6 +1496,8 @@ SlashCmdList.RAREWATCH = function(input)
             ns.IsSharing() and "on" or "|cffff6060off|r", ns.OnlineUsers(), #queue, n, tracked, shadow, h))
     elseif cmd == "test" then
         ns.Alert("TEST: Humar the Pridelord is UP")
+    elseif cmd == "swaps" then
+        if ns.Join then ns.Join.PrintSwaps() end
     else
         for _, l in ipairs(HELP) do ns.Print(l) end
     end

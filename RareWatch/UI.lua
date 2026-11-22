@@ -124,6 +124,41 @@ function ns.SetWaypoint(info)
     return false, where .. "  (install TomTom for waypoints)"
 end
 
+-- A small "Join" button for a fresh sighting by another player (see Join.lua).
+local function JoinButton(parent)
+    local b = W.Button(parent, { text = "Join", icon = "users", style = "accent", h = 22, size = 11 })
+    b:HookScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText("Join " .. (self.host or "") .. "'s layer", 1, 1, 1)
+        if self.why then
+            GameTooltip:AddLine(self.why, 1, 0.75, 0.3, true)
+        else
+            GameTooltip:AddLine("Asks " .. (self.host or "them") .. " to invite you. Once they accept, the game moves you to their layer and RareWatch leaves the group again.", 0.75, 0.77, 0.8, true)
+            if ns.Join then
+                GameTooltip:AddLine(string.format("Layer moves used this hour: %d of about %d", ns.Join.Used(), ns.Join.Limit()), 0.6, 0.62, 0.68)
+            end
+        end
+        GameTooltip:Show()
+    end)
+    b:HookScript("OnLeave", function() GameTooltip:Hide() end)
+    b:SetScript("OnClick", function(self)
+        if self.disabled or not ns.Join then return end
+        ns.Join.Request(self.def, self.st)
+    end)
+    -- returns true when shown
+    function b:Bind(def, st)
+        local host, _, why
+        if ns.Join and def and st then host, _, why = ns.Join.CanJoin(def, st) end
+        if not host or why == "hide" then self:Hide(); return false end
+        self.def, self.st, self.host, self.why = def, st, host, why
+        self:SetDisabled(why ~= nil)
+        self:Show()
+        return true
+    end
+    b:Hide()
+    return b
+end
+
 local function Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
 local function EachRow(list, fn) for _, r in ipairs(list.rows) do fn(r) end end
 
@@ -282,6 +317,8 @@ local function BuildTracker(page)
         r.status:SetPoint("LEFT", 136, 0)
         r.src = W.Cell(r, 11, "R", 80, C.muted, "RIGHT")
         r.src:SetPoint("RIGHT", 0, 0)
+        r.join = JoinButton(r)
+        r.join:SetPoint("RIGHT", 0, 0)
         r.sep = W.Line(r)
         r.sep:SetPoint("BOTTOMLEFT")
         r.sep:SetPoint("BOTTOMRIGHT")
@@ -298,6 +335,9 @@ local function BuildTracker(page)
         end
         r.status:SetText(txt)
         r.src:SetText(st.src and ("by " .. st.src) or "")
+        local joinable = r.join:Bind(SelectedDef(), st)
+        r.src:ClearAllPoints()
+        r.src:SetPoint("RIGHT", joinable and -(r.join:GetWidth() + 10) or 0, 0)
         r.sep:SetShown(idx < #layerList.data)
     end)
     layerList:SetPoint("TOPLEFT", PAD, -248)
@@ -939,6 +979,8 @@ local function BuildHistory(page)
         r.src:SetPoint("LEFT", 424, 0)
         r.time = W.Cell(r, 11, "R", 150, C.muted, "RIGHT")
         r.time:SetPoint("RIGHT", -12, 0)
+        r.join = JoinButton(r)
+        r.join:SetPoint("RIGHT", -12, 0)
         r.sep = W.Line(r)
         r.sep:SetPoint("BOTTOMLEFT", 12, 0)
         r.sep:SetPoint("BOTTOMRIGHT", -12, 0)
@@ -952,6 +994,18 @@ local function BuildHistory(page)
         r.layer:SetText("Layer " .. ns.LayerShort(h.l))
         r.src:SetText(h.s or "")
         r.time:SetText(ns.Dur(ns.Now() - h.t) .. " ago" .. DOT .. ns.Day(h.t))
+        local joinable = false
+        if (h.k == "SEEN" or h.k == "SPAWN") and ns.Now() - h.t < 600 then
+            local def = ns.LookupAny(nil, h.n, false)
+            local rec = def and def.layers and def.layers[h.l]
+            if rec then joinable = r.join:Bind(def, { layer = h.l, rec = rec }) else r.join:Hide() end
+        else
+            r.join:Hide()
+        end
+        r.time:ClearAllPoints()
+        r.time:SetPoint("RIGHT", joinable and -(r.join:GetWidth() + 22) or -12, 0)
+        r.time:SetWidth(joinable and 120 or 150)
+        r.src:SetWidth(math.max(60, (r.srcW or 90) - (joinable and 60 or 0)))
     end)
     list:SetPoint("TOPLEFT", 8, -70)
     list:SetPoint("TOPRIGHT", -12, -70)
@@ -965,7 +1019,7 @@ local function BuildHistory(page)
         EachRow(list, function(r)
             r.mob:SetWidth(mobW)
             r.layer:ClearAllPoints(); r.layer:SetPoint("LEFT", layerX, 0); r.layer:SetWidth(layerW)
-            r.src:ClearAllPoints(); r.src:SetPoint("LEFT", srcX, 0); r.src:SetWidth(srcW)
+            r.src:ClearAllPoints(); r.src:SetPoint("LEFT", srcX, 0); r.src:SetWidth(srcW); r.srcW = srcW
         end)
         list:Fit(CH - 70 - 12)
     end
@@ -1048,7 +1102,7 @@ local function BuildSettings(page)
         local GAP = 14
         local colW = Clamp(math.floor((avail - GAP * (ncol - 1)) / ncol), 300, 480)
         -- which column each section goes in
-        local plan = ncol == 3 and { 1, 2, 2, 3, 3 } or { 1, 1, 2, 2, 2 }
+        local plan = ncol == 3 and { 1, 2, 3, 2 } or { 1, 1, 2, 2 }
         -- row height: as roomy as the window height allows
         local HEAD, FOOT, TOP = 36, 12, 60
         local rows, secs = { 0, 0, 0 }, { 0, 0, 0 }
@@ -1140,7 +1194,11 @@ local function BuildSettings(page)
             or "Syncing is automatic. Resync just does it right now.")
 
     ns.settingsOnlineRow = onlineRow
-    Section(2, "Layers")
+    local hostRow = Row(2, "Let others join my layer", W.Switch(page, function() return o.hostJoin and not (ns.Join and ns.Join.PausedFor() > 0) end,
+        function(v) o.hostJoin = v; if v and ns.Join then ns.Join.Resume() end; ns.Changed() end),
+        "When you see a rare, other RareWatch users can ask to join your layer for it. You always click Accept or Decline first, and nobody whose layer moves are nearly used up can ask (that could move you off the rare). At most 3 requests every 5 minutes; anyone you decline waits 10 minutes. Turning this back on ends a pause.")
+    local movesRow = Row(2, "Layer moves this hour", nil,
+        "The game allows about 10 layer moves an hour. Every move counts, from RareWatch, Layer-Swap or joining any group. Join requests stop at 8, so a host is never moved to you instead.")
     local layerRow = Row(2, "", nil)
     local named = CreateFrame("Frame", nil, page)
     named:SetSize(150, 24)
@@ -1186,6 +1244,13 @@ local function BuildSettings(page)
     refreshers[4] = function()
         for _, c in ipairs(refreshables) do c:Refresh() end
         local n = ns.OnlineUsers()
+        if ns.Join then
+            local paused = ns.Join.PausedFor()
+            hostRow.label:SetText("Let others join my layer" .. (paused > 0 and (Hex(C.muted) .. "  paused " .. ns.Dur(paused) .. "|r") or ""))
+            local used = ns.Join.Used()
+            local col = used >= 8 and C.red or (used >= 7 and C.yellow or C.accent)
+            movesRow.label:SetText("Layer moves this hour: " .. Hex(col) .. used .. "|r of about " .. ns.Join.Limit())
+        end
         onlineRow.label:SetText("Users online: " .. Hex(n > 0 and C.accent or C.muted) .. (n + 1) .. "|r (incl. you)")
         if layerErr then
             layerRow.label:SetText(Hex(C.red) .. layerErr .. "|r")

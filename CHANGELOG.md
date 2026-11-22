@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0-beta
+- **Join a sighting.** When another RareWatch user reports a rare alive in the last 10 minutes, a **Join** button appears next to it in the Tracking and History tabs. Click it to ask that player to bring you onto their layer. They get a prompt with **Accept** / **Decline** that shows how risky accepting is for them (2 minutes to answer, so they can finish a fight first). Once they accept, RareWatch accepts the invite, waits for the game to move you, and leaves the group again.
+- **Protects the player who found the rare.** The game only allows about 10 layer moves an hour, and past that it can move the host to your layer instead. RareWatch counts every layer move for all characters on your account and stops asking at 8; the host's RareWatch refuses requests at 8 too. If a host gets moved anyway, both players are told, that player can't ask the host again for an hour, and their count is set to full.
+- **No spam.** You only ever see one request at a time, and at most 3 every 5 minutes. Anyone you decline can't ask you again for 10 minutes, and **Pause 15 min** on the prompt stops all requests for a while.
+- No join requests in combat, while dead, in an instance or while in a group. Hosts only get requests for a rare they saw themselves, on the layer they're still on, from someone in the same zone, and at most 6 joins every 10 minutes.
+- New in Settings > Sharing: **Let others join my layer** (on by default) and **Layer moves this hour**. Layers is now part of the Sharing card.
+- New command: `/rwatch swaps` lists the layer moves used this hour.
+- Beta: please report how joining works for you, especially if a host gets moved.
 ## 0.6.7
 - **Fixed repeated chat messages** like "X reports Humar the Pridelord tamed (58m ago)" for an event that happened long ago. Once a busy rare had 40 layer records, a new report was never actually saved, so every copy of it from other players looked new, was announced again and kept other players re-syncing. New reports are now saved properly, and each event is announced in chat only once.
 
