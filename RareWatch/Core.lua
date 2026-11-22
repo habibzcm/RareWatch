@@ -1,6 +1,6 @@
 -- RareWatch - Core: data, detection, sharing, slash commands.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.6.6"
+ns.VERSION = "0.6.7"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
@@ -227,17 +227,18 @@ function ns.BumpDigest() digestVer = digestVer + 1 end
 local function LatestOf(r) return math.max(r.down or 0, r.seen or 0, r.spawn or 0) end
 
 -- Drop records past their keep time; if a rare has too many layers, drop the stalest.
-function ns.PruneDef(def, t)
+-- `protect` is a record being created right now: it is still empty, so it would look like the stalest.
+function ns.PruneDef(def, t, protect)
     t = t or ns.Now()
     local keep, n = ns.KeepFor(def), 0
     for layer, r in pairs(def.layers or {}) do
-        if t - LatestOf(r) > keep then def.layers[layer] = nil else n = n + 1 end
+        if layer ~= protect and t - LatestOf(r) > keep then def.layers[layer] = nil else n = n + 1 end
     end
     while n > MAX_LAYERS do
         local oldL, oldT
         for layer, r in pairs(def.layers) do
             local l = LatestOf(r)
-            if not oldT or l < oldT then oldL, oldT = layer, l end
+            if layer ~= protect and (not oldT or l < oldT) then oldL, oldT = layer, l end
         end
         if not oldL then break end
         def.layers[oldL] = nil
@@ -315,7 +316,7 @@ function ns.GetRec(def, layer)
         def.layers[layer] = r
         local n = 0
         for _ in pairs(def.layers) do n = n + 1 end
-        if n > MAX_LAYERS then ns.PruneDef(def) end
+        if n > MAX_LAYERS then ns.PruneDef(def, nil, layer) end
     end
     return r
 end
@@ -357,6 +358,16 @@ function ns.ApplyEvent(def, kind, layer, t, src)
     if not def or not t then return false end
     if t > ns.Now() + 120 then return false end
     layer = layer or "?"
+    if not def.layers[layer] then
+        -- a full rare only takes a new layer record for news newer than the stalest one it holds
+        local n, oldest = 0, nil
+        for _, x in pairs(def.layers) do
+            n = n + 1
+            local l = LatestOf(x)
+            if not oldest or l < oldest then oldest = l end
+        end
+        if n >= MAX_LAYERS and oldest and t <= oldest then return false end
+    end
     local r = ns.GetRec(def, layer)
     if kind == "DOWN" or kind == "TAME" then
         if r.down and math.abs(r.down - t) < 120 then return false end
@@ -1316,6 +1327,7 @@ local function ValidLayer(l)
     return type(l) == "string" and #l <= 24 and (l == "?" or l:match("^[%w%._%-]+$") ~= nil)
 end
 
+local announced = {}
 local function ApplyRemote(id, name, kind, layer, t, who)
     if not ns.EVENT_INFO[kind] or not t or not ValidLayer(layer) then return false end
     if ns.Private() and not layer:match("^[%w_%-]+%.[%w_%-]+$") then layer = "?" end   -- only "<player>.<letter>" is understood here
@@ -1324,8 +1336,12 @@ local function ApplyRemote(id, name, kind, layer, t, who)
     if not def then return false end
     if not def.id and id then def.id = id; ns.RebuildIndex() end
     local changed = ns.ApplyEvent(def, kind, layer, t, who)
-    ns.GetRec(def, layer).heard = GetTime()
+    if def.layers[layer] then def.layers[layer].heard = GetTime() end
     if changed and not def.shadow then
+        -- each event is announced once, however many players pass it on
+        local key = table.concat({ def.name, kind, layer, math.floor(t / 120) }, "|")
+        if announced[key] then return changed end
+        announced[key] = true
         local age = ns.Now() - t
         if (kind == "SEEN" or kind == "SPAWN") and age < 600 then
             if ns.opt.shareAlerts and def.alert then ns.PlayAlertSound() end

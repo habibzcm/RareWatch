@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.7
+- **Fixed repeated chat messages** like "X reports Humar the Pridelord tamed (58m ago)" for an event that happened long ago. Once a busy rare had 40 layer records, a new report was never actually saved, so every copy of it from other players looked new, was announced again and kept other players re-syncing. New reports are now saved properly, and each event is announced in chat only once.
+
 ## 0.6.6
 - **The window is resizable.** Drag the grip in the bottom-right corner. The rare list, the detail panel, Browse and History all grow with it, so a bigger window shows more rares and more rows without scrolling. The size is saved between sessions.
 - New **Reset window size** button in Settings (Advanced) to go back to the default size.
