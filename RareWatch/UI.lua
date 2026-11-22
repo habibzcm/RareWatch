@@ -9,10 +9,12 @@ local pages, nav, refreshers = {}, {}, {}
 local activePage = 1
 local selectedKey
 
-local WIN_W, WIN_H, SIDE = 760, 480, 48
-local CW, CH = WIN_W - SIDE, WIN_H
+local WIN_W, WIN_H, SIDE = 760, 480, 48          -- default size; the window can be resized
+local MIN_W, MIN_H, MAX_W, MAX_H = 760, 480, 1500, 1000
+local CW, CH = WIN_W - SIDE, WIN_H                 -- content area, updated on resize
 local LIST_W = 240
 local DW = CW - LIST_W
+local layouts = {}                                 -- per page: re-fit to the current size
 local DOT = "  \194\183  "
 
 local STATUS = {
@@ -122,6 +124,9 @@ function ns.SetWaypoint(info)
     return false, where .. "  (install TomTom for waypoints)"
 end
 
+local function Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
+local function EachRow(list, fn) for _, r in ipairs(list.rows) do fn(r) end end
+
 local function PageTitle(page, text)
     local t = W.Text(page, 17, "M", text)
     t:SetPoint("TOPLEFT", 20, -20)
@@ -135,7 +140,8 @@ local function BuildTracker(page)
     -- left column
     local col = CreateFrame("Frame", nil, page)
     col:SetPoint("TOPLEFT", 0, 0)
-    col:SetSize(LIST_W, CH)
+    col:SetPoint("BOTTOMLEFT", 0, 0)
+    col:SetWidth(LIST_W)
     W.Rect(col, C.col)
 
     local head = W.Text(col, 13, "M", "Tracking")
@@ -144,9 +150,10 @@ local function BuildTracker(page)
     headCount:SetPoint("TOPRIGHT", -16, -21)
 
     local footer = W.Cell(col, 11, "R", LIST_W - 32, C.muted)
+    local LW, SX = 110, 134   -- layer column width / status x, set by the layout
     footer:SetPoint("BOTTOMLEFT", 16, 14)
 
-    local cards = W.List(col, CH - 56 - 40, 62, function(list)
+    local cards = W.List(col, MAX_H - 56 - 40, 62, function(list)
         local r = CreateFrame("Button", nil, list)
         r.bg = W.Round(r, C.card, 8)
         r.bg:SetColor(C.card, 0)
@@ -185,7 +192,7 @@ local function BuildTracker(page)
         if item.n > 1 then line = line .. "  +" .. (item.n - 1) end
         r.sub:SetText(line ~= "" and line or "No reports yet")
         local p = Progress(def, st)
-        local w = math.max(0, (LIST_W - 8 - 8 - 24) * p)
+        local w = math.max(0, (LIST_W - 16 - 24) * p)
         r.fill:SetShown(w >= 1)
         r.fill:SetWidth(math.max(1, w))
         r.fill:SetColorTexture(c[1], c[2], c[3], st.code == "STALE" and 0.5 or 1)
@@ -196,7 +203,7 @@ local function BuildTracker(page)
     -- detail
     local d = CreateFrame("Frame", nil, page)
     d:SetPoint("TOPLEFT", LIST_W, 0)
-    d:SetSize(DW, CH)
+    d:SetPoint("BOTTOMRIGHT", 0, 0)
     local PAD = 22
     local TW = DW - PAD * 2
 
@@ -265,7 +272,7 @@ local function BuildTracker(page)
     local layersHead = tabLayers
     local dropNote = W.Text(d, 10, "R", "Vanilla loot data. Forever may differ.", C.muted, "RIGHT")
     local layerList
-    layerList = W.List(d, 4 * 28, 28, function(list)
+    layerList = W.List(d, 24 * 28, 28, function(list)
         local r = CreateFrame("Frame", nil, list)
         r.dot = W.Dot(r, 7)
         r.dot:SetPoint("LEFT", 0, 0)
@@ -284,7 +291,7 @@ local function BuildTracker(page)
         r.dot:SetVertexColor(c[1], c[2], c[3], 1)
         local isMe = st.layer == ns.LayerFor(SelectedDef())
         r.layer:SetText(ns.LayerShort(st.layer) .. (isMe and ("  " .. Hex(C.accent) .. "your layer|r") or ""))
-        r.layer:SetWidth(isMe and 120 or 80)
+        r.layer:SetWidth(LW)
         local txt = st.text:sub(1, 1):upper() .. st.text:sub(2)
         if st.code == "WAIT" or st.code == "OPEN" then
             txt = txt .. Hex(C.muted) .. "   " .. ns.Clock(st.windowFrom) .. " - " .. ns.Clock(st.windowTo) .. "|r"
@@ -297,7 +304,7 @@ local function BuildTracker(page)
     layerList:SetPoint("TOPRIGHT", -PAD + 8, -248)
 
     local dropList
-    dropList = W.List(d, 6 * 24, 24, function(list)
+    dropList = W.List(d, 28 * 24, 24, function(list)
         local r = CreateFrame("Frame", nil, list)
         r:EnableMouse(true)
         r.name = W.Cell(r, 12, "M", 236)
@@ -516,6 +523,39 @@ local function BuildTracker(page)
     local detailParts = { name, meta, pill, heroLabel, hero, heroNote, tl, chip1, chip2, editResp, layersHead,
         layerList, dropList, dropNote, tabDrops, logKill, logSeen, waypoint, untrack, bell, feedback }
 
+    layouts[1] = function()
+        LIST_W = Clamp(math.floor(CW * 0.27), 240, 340)
+        col:SetWidth(LIST_W)
+        d:ClearAllPoints()
+        d:SetPoint("TOPLEFT", LIST_W, 0)
+        d:SetPoint("BOTTOMRIGHT", 0, 0)
+        footer:SetWidth(LIST_W - 32)
+        local cw = LIST_W - 16 - 24
+        EachRow(cards, function(r) r.name:SetWidth(cw - 76); r.sub:SetWidth(cw) end)
+        DW = CW - LIST_W
+        TW = DW - PAD * 2
+        local RW = TW + 8 - 8               -- layer/drop row width
+        LW = Clamp(math.floor(RW * 0.24), 110, 220)
+        SX = 16 + LW + 10
+        local statusW = Clamp(math.floor((RW - SX) * 0.6), 180, 420)
+        EachRow(layerList, function(r)
+            r.status:ClearAllPoints(); r.status:SetPoint("LEFT", SX, 0); r.status:SetWidth(statusW)
+            r.src:SetWidth(math.max(80, RW - SX - statusW - 12))
+        end)
+        local nameW = math.max(236, RW - 56 - 124 - 12)
+        EachRow(dropList, function(r)
+            r.name:SetWidth(nameW)
+            r.pct:ClearAllPoints(); r.pct:SetPoint("LEFT", nameW + 4, 0)
+        end)
+        name:SetWidth(TW - 140)
+        meta:SetWidth(TW - 40)
+        heroNote:SetWidth(TW)
+        tl:SetWidth(TW)
+        feedback:SetWidth(TW)
+        cards:Fit(CH - 56 - 40)
+    end
+    layouts[1]()
+
     refreshers[1] = function()
         local mobs = SortedMobs()
         cards:SetData(mobs, "")
@@ -621,10 +661,12 @@ local function BuildTracker(page)
         chip1:SetPoint("TOPLEFT", PAD, y0)
         layersHead:ClearAllPoints()
         layersHead:SetPoint("TOPLEFT", PAD, y0 - 40)
+        local listH = CH + (y0 - 72) - 74          -- room down to the action buttons
         for _, lst in ipairs({ layerList, dropList }) do
             lst:ClearAllPoints()
             lst:SetPoint("TOPLEFT", PAD, y0 - 72)
             lst:SetPoint("TOPRIGHT", -PAD + 8, y0 - 72)
+            lst:Fit(listH)
         end
         dropNote:ClearAllPoints()
         dropNote:SetPoint("TOPRIGHT", -PAD + 8, y0 - 46)
@@ -673,7 +715,7 @@ local function BuildBrowse(page)
     local addCustom = W.Button(page, { text = "Custom mob", icon = "plus", h = 26, size = 11 })
     addCustom:SetPoint("TOPRIGHT", -20, -62)
 
-    local list = W.List(page, CH - 104 - 12, 44, function(lst)
+    local list = W.List(page, MAX_H - 104 - 12, 44, function(lst)
         local r = CreateFrame("Frame", nil, lst)
         r.bg = W.Round(r, C.chip, 8)
         r.bg:SetColor(C.chip, 0)
@@ -768,6 +810,20 @@ local function BuildBrowse(page)
     end, 4)
     list:SetPoint("TOPLEFT", 12, -104)
     list:SetPoint("TOPRIGHT", -12, -104)
+    layouts[2] = function()
+        local RW = CW - 24 - 8
+        local nameW = 290 + math.floor(math.max(0, RW - 680) * 0.35)
+        local respX = nameW + 40
+        local seenX = respX + 100
+        EachRow(list, function(r)
+            r.name:SetWidth(nameW); r.sub:SetWidth(nameW + 24)
+            r.resp:ClearAllPoints(); r.resp:SetPoint("LEFT", respX, 0)
+            r.seen:ClearAllPoints(); r.seen:SetPoint("LEFT", seenX, 0)
+            r.seen:SetWidth(math.max(130, RW - seenX - 92 - 24))
+        end)
+        list:Fit(CH - 104 - 12)
+    end
+    layouts[2]()
 
     -- custom mob popover
     local cp = W.Popover("RareWatchCustomPopover", 340, 214)
@@ -869,7 +925,7 @@ local function BuildHistory(page)
     local sIcon = W.Icon(search, "search", 14, C.muted)
     sIcon:SetPoint("RIGHT", -10, 0)
 
-    local list = W.List(page, CH - 70 - 12, 36, function(lst)
+    local list = W.List(page, MAX_H - 70 - 12, 36, function(lst)
         local r = CreateFrame("Frame", nil, lst)
         r.dot = W.Dot(r, 7)
         r.dot:SetPoint("LEFT", 12, 0)
@@ -899,6 +955,21 @@ local function BuildHistory(page)
     end)
     list:SetPoint("TOPLEFT", 8, -70)
     list:SetPoint("TOPRIGHT", -12, -70)
+    layouts[3] = function()
+        local extra = math.max(0, (CW - 20 - 8) - 684)
+        local mobW = 220 + math.floor(extra * 0.25)
+        local layerX = 104 + mobW + 6
+        local layerW = 90 + math.floor(extra * 0.4)
+        local srcX = layerX + layerW + 4
+        local srcW = 90 + math.floor(extra * 0.35)
+        EachRow(list, function(r)
+            r.mob:SetWidth(mobW)
+            r.layer:ClearAllPoints(); r.layer:SetPoint("LEFT", layerX, 0); r.layer:SetWidth(layerW)
+            r.src:ClearAllPoints(); r.src:SetPoint("LEFT", srcX, 0); r.src:SetWidth(srcW)
+        end)
+        list:Fit(CH - 70 - 12)
+    end
+    layouts[3]()
 
     -- newest event first, by when it happened (not by when it reached us)
     local function Newest(a, b) return (a.t or 0) > (b.t or 0) end
@@ -935,23 +1006,24 @@ local function BuildSettings(page)
     PageTitle(page, "Settings")
     local o = ns.opt
     local refreshables = {}
-    local COLW, ROWH = 318, 25
-    local cols = { { x = 20, y = -60 }, { x = 20 + COLW + 34, y = -60 } }
+    local PADX = 16
+    -- Each section is a card. The layout deals the cards into 2 or 3 columns
+    -- depending on the window width, and stretches them to fill it.
+    local sections, cur = {}, nil
 
     local function Section(ci, text)
-        local cc = cols[ci]
-        if cc.y ~= -60 then cc.y = cc.y - 12 end
-        local t = W.Text(page, 11, "M", text, C.muted)
-        t:SetPoint("TOPLEFT", cc.x, cc.y)
-        cc.y = cc.y - 18
+        local card = CreateFrame("Frame", nil, page)
+        W.Round(card, C.card, 10)
+        local t = W.Text(card, 11, "M", text:upper(), C.muted)
+        t:SetPoint("TOPLEFT", PADX, -14)
+        cur = { card = card, rows = {}, col2 = ci }
+        sections[#sections + 1] = cur
     end
     local function Row(ci, label, control, tip)
-        local cc = cols[ci]
-        local row = CreateFrame("Frame", nil, page)
-        row:SetPoint("TOPLEFT", cc.x, cc.y)
-        row:SetSize(COLW, ROWH)
+        local card = cur.card
+        local row = CreateFrame("Frame", nil, card)   -- placed by Layout
         if tip then row:EnableMouse(true) end
-        local l = W.Cell(row, 12, "R", COLW - 120, C.text2)
+        local l = W.Cell(row, 12, "R", 200, C.text2)
         l:SetPoint("LEFT", 0, 0)
         l:SetText(label)
         if control then
@@ -965,10 +1037,61 @@ local function BuildSettings(page)
         sep:SetPoint("BOTTOMLEFT")
         sep:SetPoint("BOTTOMRIGHT")
         sep:SetAlpha(0.6)
-        cc.y = cc.y - ROWH
-        row.label = l
+        row.label, row.control = l, control
+        cur.rows[#cur.rows + 1] = row
         return row
     end
+
+    local function Layout()
+        local avail = CW - 40
+        local ncol = avail >= 1040 and 3 or 2
+        local GAP = 14
+        local colW = Clamp(math.floor((avail - GAP * (ncol - 1)) / ncol), 300, 480)
+        -- which column each section goes in
+        local plan = ncol == 3 and { 1, 2, 2, 3, 3 } or { 1, 1, 2, 2, 2 }
+        -- row height: as roomy as the window height allows
+        local HEAD, FOOT, TOP = 36, 12, 60
+        local rows, secs = { 0, 0, 0 }, { 0, 0, 0 }
+        for i, sec in ipairs(sections) do
+            local c = plan[i] or sec.col2
+            rows[c] = rows[c] + #sec.rows
+            secs[c] = secs[c] + 1
+        end
+        local function Fits()
+            local rh = 28
+            for c = 1, ncol do
+                if rows[c] > 0 then
+                    local free = CH - TOP - 12 - secs[c] * (HEAD + FOOT) - (secs[c] - 1) * GAP
+                    rh = math.min(rh, math.floor(free / rows[c]))
+                end
+            end
+            return rh
+        end
+        local rh = Fits()
+        if rh < 25 then HEAD, FOOT, GAP, TOP = 32, 8, 10, 56; rh = Fits() end
+        rh = math.max(22, rh)
+        local ys = { -TOP, -TOP, -TOP }
+        for i, sec in ipairs(sections) do
+            local c = plan[i] or sec.col2
+            for k, row in ipairs(sec.rows) do
+                local y = -HEAD - (k - 1) * rh
+                row:ClearAllPoints()
+                row:SetPoint("TOPLEFT", PADX, y)
+                row:SetPoint("TOPRIGHT", -PADX, y)
+                row:SetHeight(rh)
+            end
+            sec.card:SetHeight(HEAD + #sec.rows * rh + FOOT)
+            sec.card:ClearAllPoints()
+            sec.card:SetPoint("TOPLEFT", 20 + (c - 1) * (colW + GAP), ys[c])
+            sec.card:SetWidth(colW)
+            ys[c] = ys[c] - sec.card:GetHeight() - GAP
+            for _, row in ipairs(sec.rows) do
+                local cw = row.control and row.control:GetWidth() or 0
+                row.label:SetWidth(math.max(80, colW - PADX * 2 - cw - (cw > 0 and 12 or 0)))
+            end
+        end
+    end
+    layouts[4] = Layout
     local function Opt(key) return W.Switch(page, function() return o[key] end, function(v) o[key] = v; ns.Changed() end) end
 
     -- column 1
@@ -1003,6 +1126,7 @@ local function BuildSettings(page)
     Row(1, "Window size", W.Stepper(page, function() return o.windowScale end,
         function(v) o.windowScale = v; main:SetScale(v) end, 0.7, 1.4, 0.1, pct))
 
+
     -- column 2
     Section(2, "Sharing")
     Row(2, "Share with my guild", Opt("shareGuild"))
@@ -1018,7 +1142,6 @@ local function BuildSettings(page)
     ns.settingsOnlineRow = onlineRow
     Section(2, "Layers")
     local layerRow = Row(2, "", nil)
-    layerRow.label:SetWidth(COLW)
     local named = CreateFrame("Frame", nil, page)
     named:SetSize(150, 24)
     local labelIn = W.Edit(named, 70, 24, "A")
@@ -1050,10 +1173,15 @@ local function BuildSettings(page)
             wipe(ns.db.history)
             ns.Changed()
         end))
+    Row(2, "Reset window size", W.Button(page, { text = "Reset", icon = "refresh", h = 24, size = 11,
+        onClick = function() ns.ResetMainSize() end }),
+        "Drag the bottom-right corner of the window to resize it. Reset puts it back to the default size.")
     Row(2, "Use the game's font (after /reload)", W.Switch(page, function() return o.plainFont end, function(v)
         o.plainFont = v
         ns.Print("Font change applies after /reload.")
     end))
+
+    Layout()
 
     refreshers[4] = function()
         for _, c in ipairs(refreshables) do c:Refresh() end
@@ -1121,6 +1249,16 @@ local function BuildMain()
     main:SetScale(ns.opt.windowScale)
     W.Round(main, C.bg, 10)
     RestorePos(main, "mainPos", { "CENTER", UIParent, "CENTER", 0, 40 })
+    local sz = ns.db.mainSize
+    if sz and sz[1] and sz[2] then
+        main:SetSize(math.max(MIN_W, math.min(MAX_W, sz[1])), math.max(MIN_H, math.min(MAX_H, sz[2])))
+    end
+    main:SetResizable(true)
+    if main.SetResizeBounds then pcall(main.SetResizeBounds, main, MIN_W, MIN_H, MAX_W, MAX_H)
+    else
+        if main.SetMinResize then pcall(main.SetMinResize, main, MIN_W, MIN_H) end
+        if main.SetMaxResize then pcall(main.SetMaxResize, main, MAX_W, MAX_H) end
+    end
     main:Hide()
     W.EscClose(main)
     main:SetScript("OnHide", function() W.HidePopovers() end)
@@ -1155,7 +1293,7 @@ local function BuildMain()
 
     local content = CreateFrame("Frame", nil, main)
     content:SetPoint("TOPLEFT", SIDE, 0)
-    content:SetSize(CW, CH)
+    content:SetPoint("BOTTOMRIGHT", 0, 0)
 
     for i, pd in ipairs(PAGE_DEFS) do
         local b = CreateFrame("Button", nil, side)
@@ -1196,7 +1334,65 @@ local function BuildMain()
     close:SetPoint("TOPRIGHT", -12, -14)
     if not W.iconsOK then close:SetLabel("X") end
 
+    -- resize grip in the bottom-right corner
+    local grip = CreateFrame("Button", nil, main)
+    grip:SetSize(20, 20)
+    grip:SetPoint("BOTTOMRIGHT", -3, 3)
+    grip:SetFrameLevel((main:GetFrameLevel() or 1) + 20)
+    grip.dots = {}
+    for _, p in ipairs({ { 0, 0 }, { -5, 0 }, { -10, 0 }, { 0, 5 }, { -5, 5 }, { 0, 10 } }) do
+        local dot = grip:CreateTexture(nil, "OVERLAY")
+        dot:SetColorTexture(1, 1, 1, 1)
+        dot:SetSize(2, 2)
+        dot:SetPoint("BOTTOMRIGHT", p[1] - 4, p[2] + 4)
+        dot:SetVertexColor(C.muted[1], C.muted[2], C.muted[3], 1)
+        grip.dots[#grip.dots + 1] = dot
+    end
+    local function GripColor(c) for _, dot in ipairs(grip.dots) do dot:SetVertexColor(c[1], c[2], c[3], 1) end end
+    grip:SetScript("OnEnter", function(self)
+        GripColor(C.text)
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Resize", 1, 1, 1)
+        GameTooltip:AddLine("Drag to make the window bigger or smaller.", 0.75, 0.77, 0.8, true)
+        GameTooltip:Show()
+    end)
+    grip:SetScript("OnLeave", function() GripColor(C.muted); GameTooltip:Hide() end)
+    grip:SetScript("OnMouseDown", function() main:StartSizing("BOTTOMRIGHT") end)
+    grip:SetScript("OnMouseUp", function()
+        main:StopMovingOrSizing()
+        ns.db.mainSize = { math.floor(main:GetWidth() + 0.5), math.floor(main:GetHeight() + 0.5) }
+        SavePos(main, "mainPos")
+        ns.ReflowMain()
+    end)
+
+    -- re-fit the pages whenever the size changes (at most once per frame)
+    local reflowPending = false
+    main:SetScript("OnSizeChanged", function()
+        if reflowPending then return end
+        reflowPending = true
+        C_Timer.After(0, function() reflowPending = false; ns.ReflowMain() end)
+    end)
+
     main:SetScript("OnShow", function() ns.RefreshMain() end)
+    ns.ReflowMain()
+end
+
+-- Work out the content area from the window's size and let each page fit itself to it.
+function ns.ReflowMain()
+    if not main then return end
+    local w, h = main:GetWidth() or WIN_W, main:GetHeight() or WIN_H
+    if w < 100 then w = WIN_W end
+    if h < 100 then h = WIN_H end
+    CW, CH = w - SIDE, h
+    for _, fn in pairs(layouts) do fn() end
+    ns.RefreshMain()
+end
+
+function ns.ResetMainSize()
+    if not main then return end
+    ns.db.mainSize = nil
+    main:SetSize(WIN_W, WIN_H)
+    ns.ReflowMain()
 end
 
 ---------------------------------------------------------------------------

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6
+- **The window is resizable.** Drag the grip in the bottom-right corner. The rare list, the detail panel, Browse and History all grow with it, so a bigger window shows more rares and more rows without scrolling. The size is saved between sessions.
+- New **Reset window size** button in Settings (Advanced) to go back to the default size.
+- Columns widen with the window, so names, layers and players that were cut off ("by Maul Re...", "Layer A (Nazul Tornf...") show in full on a bigger window. The Tracking list column grows a little too.
+- Settings is redesigned as cards that fill the window: two columns normally, three on a wide window, with rows that fit the window height. Labels are no longer cut off.
+
 ## 0.6.5
 - **Sharing is back on game build 71037 and later.** Other RareWatch users' kills, tames and sightings show again in the Tracking and History tabs, and you get the chat alerts again.
 - Layer numbers can't be matched between players on these builds, so a shared report shows the layer **as that player sees it**, e.g. "C (Bob's)". Their letter is not necessarily your letter, so use it as a hint about when and roughly where, not as a timer for your own layer. Timers for your own layer still come only from what you see.

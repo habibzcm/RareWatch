@@ -466,6 +466,16 @@ function W.List(parent, height, rowH, makeRow, fillRow, gap)
         L.rows[i] = r
     end
 
+    -- Show as many rows as fit in a new height (up to the rows built at creation).
+    function L:Fit(h)
+        h = math.max(rowH, h)
+        if self.fitH == h then return end
+        self.fitH = h
+        self:SetHeight(h)
+        self.visible = math.max(1, math.min(#self.rows, math.floor((h + gap) / (rowH + gap))))
+        self:Refresh()
+    end
+
     function L:SetData(data, emptyText)
         self.data = data or {}
         self.empty:SetText(emptyText or "")
@@ -478,7 +488,7 @@ function W.List(parent, height, rowH, makeRow, fillRow, gap)
         if self.offset > maxOff then self.offset = maxOff end
         for i, r in ipairs(self.rows) do
             local idx = i + self.offset
-            local item = self.data[idx]
+            local item = (i <= self.visible) and self.data[idx] or nil
             if item then r:Show(); fillRow(r, item, idx) else r:Hide() end
         end
         self.empty:SetShown(n == 0)
