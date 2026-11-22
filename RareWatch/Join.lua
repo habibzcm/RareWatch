@@ -50,6 +50,22 @@ local function Now() return ns.Now() end
 
 local function Clean(name) return (tostring(name or ""):gsub("[^%w_%-]", "")) end
 
+-- Forever names have two parts ("Bluubs Tanockers"). UnitName gives only the first, but messages, whispers and
+-- invites need the full name. So names are compared on their first part, and messages go to the full name.
+local function Short(name) return Ambiguate(tostring(name or ""), "short") end
+local function First(name) return Short(name):match("^[^%s]+") or "" end
+local function SameName(a, b)
+    if not a or not b then return false end
+    a, b = Short(a), Short(b)
+    return a == b or First(a) == First(b)
+end
+-- Does a full name belong to the owner part of a layer key? (the key holds the first name, or older versions
+-- the whole name squeezed to 12 characters)
+local function OwnerIs(name, owner)
+    if not name or owner == "" then return false end
+    return Clean(First(name)) == owner or Clean(Short(name)):sub(1, 12) == owner
+end
+
 local function InGroup() return (IsInGroup and IsInGroup()) or (GetNumGroupMembers and GetNumGroupMembers() > 0) end
 
 local function InInstance()
@@ -95,7 +111,7 @@ local function InGroupWith(name)
     if not name then return false end
     for i = 1, 4 do
         local n = UnitName("party" .. i)
-        if n and Ambiguate(n, "short") == name then return true end
+        if n and SameName(n, name) then return true end
     end
     return false
 end
@@ -258,10 +274,15 @@ local function HostOf(st)
     local owner, letter = st.layer:match("^([%w_%-]+)%.([%w_%-]+)$")
     if not owner then return end
     local r = st.rec or {}
-    for _, src in ipairs({ r.seenSrc, r.spawnSrc }) do
-        if src and Clean(src) == owner then return src, letter end
+    -- the full name: from the record, or failing that (relayed by someone else) from the users we've heard from
+    for _, src in ipairs({ r.seenSrc, r.spawnSrc, r.downSrc }) do
+        if OwnerIs(src, owner) then return Short(src), letter end
     end
-    -- relayed by someone else: the owner's name is usable if nothing was stripped from it
+    local best, bestT
+    for name, p in pairs(ns.peers or {}) do
+        if OwnerIs(name, owner) and (not bestT or (p.t or 0) > bestT) then best, bestT = name, p.t or 0 end
+    end
+    if best then return Short(best), letter end
     if owner ~= "" then return owner, letter end
 end
 
@@ -272,7 +293,7 @@ function J.CanJoin(def, st)
     local seen = math.max(r.seen or 0, r.spawn or 0)
     if seen == 0 or (r.down and r.down >= seen) or Now() - seen > FRESH then return nil, nil, "hide" end
     local host, letter = HostOf(st)
-    if not host or host == ns.me then return nil, nil, "hide" end
+    if not host or SameName(host, ns.me) then return nil, nil, "hide" end
     if state.mode ~= "idle" then return host, letter, "Already asking someone." end
     if InGroup() then return host, letter, "Leave your group first." end
     if InInstance() then return host, letter, "Not inside an instance." end
@@ -337,7 +358,7 @@ function J.Cancel()
 end
 
 local function GuestReply(who, nonce, code, extra)
-    if not state.host or state.nonce ~= nonce or Ambiguate(who, "short") ~= state.host then return end
+    if not state.host or state.nonce ~= nonce or not SameName(who, state.host) then return end
     local host, def = state.host, state.def
     if code == "WAIT" and state.mode == "asking" then
         state.mode = "waiting"
@@ -576,7 +597,7 @@ function ns.JoinMessage(tag, who, channel, a, b, c, d, e)
     elseif tag == "j" then
         GuestReply(who, a, b, c)
     elseif tag == "Q" then
-        if state.guest == who and state.nonce == a and (state.mode == "prompt" or state.mode == "invited") then
+        if SameName(state.guest, who) and state.nonce == a and (state.mode == "prompt" or state.mode == "invited") then
             Reset()
             Result("Request withdrawn", who .. " cancelled their request.", "warn")
         end
@@ -601,7 +622,7 @@ ev:SetScript("OnEvent", function(_, event, ...)
         lastCombat = GetTime()
     elseif event == "PARTY_INVITE_REQUEST" then
         local from = ...
-        if state.mode == "accepted" and from and Ambiguate(from, "short") == state.host then
+        if state.mode == "accepted" and from and SameName(from, state.host) then
             if InCombat() or Dead() then
                 J.Cancel()
                 Result("Didn't join", "You were in combat or dead when the invite came.", "warn")

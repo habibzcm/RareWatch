@@ -8,6 +8,7 @@
 - New in Settings > Sharing: **Let others join my layer** (on by default) and **Layer moves this hour**. Layers is now part of the Sharing card.
 - New command: `/rwatch swaps` lists the layer moves used this hour.
 - Beta: please report how joining works for you, especially if a host gets moved.
+
 ## 0.6.7
 - **Fixed repeated chat messages** like "X reports Humar the Pridelord tamed (58m ago)" for an event that happened long ago. Once a busy rare had 40 layer records, a new report was never actually saved, so every copy of it from other players looked new, was announced again and kept other players re-syncing. New reports are now saved properly, and each event is announced in chat only once.
 
