@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+- **Join now works with full character names.** Requests went to the first name only (for example "Bluubs" instead of "Bluubs Tanockers"), so they failed with "No player named ... is currently playing". RareWatch now sends requests and invites to the full name.
+- **Fixed repeated chat messages** like "X reports Humar the Pridelord tamed (58m ago)" for an event that happened long ago. On busy rares, new reports weren't being saved, so every copy from other players looked new and was announced again. New reports are now saved properly, and each event is announced in chat only once.
+
 ## 0.7.0-beta
 - **Join a sighting.** When another RareWatch user reports a rare alive in the last 10 minutes, a **Join** button appears next to it in the Tracking and History tabs. Click it to ask that player to bring you onto their layer. They get a prompt with **Accept** / **Decline** that shows how risky accepting is for them (2 minutes to answer, so they can finish a fight first). Once they accept, RareWatch accepts the invite, waits for the game to move you, and leaves the group again.
 - **Protects the player who found the rare.** The game only allows about 10 layer moves an hour, and past that it can move the host to your layer instead. RareWatch counts every layer move for all characters on your account and stops asking at 8; the host's RareWatch refuses requests at 8 too. If a host gets moved anyway, both players are told, that player can't ask the host again for an hour, and their count is set to full.
@@ -8,9 +12,6 @@
 - New in Settings > Sharing: **Let others join my layer** (on by default) and **Layer moves this hour**. Layers is now part of the Sharing card.
 - New command: `/rwatch swaps` lists the layer moves used this hour.
 - Beta: please report how joining works for you, especially if a host gets moved.
-
-## 0.6.7
-- **Fixed repeated chat messages** like "X reports Humar the Pridelord tamed (58m ago)" for an event that happened long ago. Once a busy rare had 40 layer records, a new report was never actually saved, so every copy of it from other players looked new, was announced again and kept other players re-syncing. New reports are now saved properly, and each event is announced in chat only once.
 
 ## 0.6.6
 - **The window is resizable.** Drag the grip in the bottom-right corner. The rare list, the detail panel, Browse and History all grow with it, so a bigger window shows more rares and more rows without scrolling. The size is saved between sessions.
