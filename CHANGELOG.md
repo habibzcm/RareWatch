@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+- **The status box now shows sightings you can join.** Respawn windows ("Due", "Window open") stopped meaning much once Forever removed layering, so the box shows your tracked rares that another RareWatch user spotted in your zone in the last 10 minutes instead. Each one shows who saw it and how long ago, with a **Join** button that asks them to bring you onto their layer.
+- The Join button stays visible but greyed out when you can't join right now (in a group, in combat, dead, or out of layer moves). Hover it to see why.
+- With nothing to join, the box says how many of your tracked rares live in this zone, or that none do. The zone you're in shows at the top.
 ## 0.7.1
 - **Join now works with full character names.** Requests went to the first name only (for example "Bluubs" instead of "Bluubs Tanockers"), so they failed with "No player named ... is currently playing". RareWatch now sends requests and invites to the full name.
 - **Fixed repeated chat messages** like "X reports Humar the Pridelord tamed (58m ago)" for an event that happened long ago. On busy rares, new reports weren't being saved, so every copy from other players looked new and was announced again. New reports are now saved properly, and each event is announced in chat only once.

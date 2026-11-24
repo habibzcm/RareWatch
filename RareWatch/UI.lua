@@ -1170,7 +1170,7 @@ local function BuildSettings(page)
     end }))
 
     Section(1, "Display")
-    Row(1, "Status box", Opt("showTracker"), "The small summary that stays on screen.")
+    Row(1, "Status box", Opt("showTracker"), "The small box that shows fresh sightings of your tracked rares in your zone, with a Join button.")
     Row(1, "Lock status box", Opt("lockTracker"))
     Row(1, "Minimap button", W.Switch(page, function() return not o.minimapHide end,
         function(v) o.minimapHide = not v; ns.Changed() end))
@@ -1461,12 +1461,39 @@ function ns.ResetMainSize()
 end
 
 ---------------------------------------------------------------------------
--- Status box
+-- Status box: fresh sightings of your tracked rares in this zone, each with a Join button.
+-- (Respawn windows stopped meaning much once Forever removed layering, so the box shows sightings instead.)
 ---------------------------------------------------------------------------
-local MAX_ROWS = 8
+local MAX_ROWS, BOX_W, ROW_H = 4, 270, 40
+
+-- Tracked rares that live in the zone you're in, and the sightings of them you could join.
+local function Sightings()
+    local here = GetRealZoneText and GetRealZoneText() or ""
+    local watched, out = 0, {}
+    for _, def in ipairs(ns.list) do
+        local info = ns.RareInfo(def.id)
+        if info and info.zone and info.zone == here then
+            watched = watched + 1
+            for _, st in ipairs(ns.Layers(def)) do
+                local host, _, why
+                if ns.Join then host, _, why = ns.Join.CanJoin(def, st) end
+                if host and why ~= "hide" then
+                    local r = st.rec or {}
+                    out[#out + 1] = { def = def, st = st, host = host, at = math.max(r.seen or 0, r.spawn or 0) }
+                end
+            end
+        end
+    end
+    table.sort(out, function(a, b)
+        if a.at ~= b.at then return a.at > b.at end
+        return a.def.name < b.def.name
+    end)
+    return out, watched, here
+end
+
 local function BuildOverlay()
     overlay = CreateFrame("Button", "RareWatchStatusBox", UIParent)
-    overlay:SetSize(240, 40)
+    overlay:SetSize(BOX_W, 40)
     overlay:SetFrameStrata("MEDIUM")
     overlay:SetClampedToScreen(true)
     overlay:SetMovable(true)
@@ -1481,24 +1508,34 @@ local function BuildOverlay()
         ns.EnsureChannel()
         if button == "RightButton" then ns.ToggleMain(4) else ns.ToggleMain(1) end
     end)
-    W.Tip(overlay, "RareWatch", "Left-click: open tracker\nRight-click: settings\nDrag: move")
+    W.Tip(overlay, "RareWatch", "Shows your tracked rares that another RareWatch user spotted in this zone in the last 10 minutes. Join puts you on their layer.\n\nLeft-click: open tracker\nRight-click: settings\nDrag: move")
 
     if W.iconsOK then W.Icon(overlay, "paw", 12, C.accent):SetPoint("TOPLEFT", 10, -9) end
     local head = W.Text(overlay, 11, "M", "RareWatch", C.sec)
     head:SetPoint("TOPLEFT", W.iconsOK and 27 or 10, -9)
-    overlay.layer = W.Text(overlay, 11, "R", "", C.muted, "RIGHT")
-    overlay.layer:SetPoint("TOPRIGHT", -10, -9)
+    overlay.zone = W.Cell(overlay, 11, "R", BOX_W - 110, C.muted, "RIGHT")
+    overlay.zone:SetPoint("TOPRIGHT", -10, -9)
     overlay.rows = {}
     for i = 1, MAX_ROWS do
-        local y = -30 - (i - 1) * 20
-        local dot = W.Dot(overlay, 6)
-        dot:SetPoint("TOPLEFT", 11, y - 5)
-        local name = W.Cell(overlay, 12, "R", 130, C.text2)
-        name:SetPoint("TOPLEFT", 24, y - 1)
-        local st = W.Cell(overlay, 12, "M", 76, C.text, "RIGHT")
-        st:SetPoint("TOPRIGHT", -10, y - 1)
-        overlay.rows[i] = { dot = dot, name = name, st = st }
+        local y = -28 - (i - 1) * ROW_H
+        local row = {}
+        row.dot = W.Dot(overlay, 6)
+        row.dot:SetPoint("TOPLEFT", 11, y - 6)
+        row.dot:SetVertexColor(C.accent[1], C.accent[2], C.accent[3], 1)
+        row.name = W.Cell(overlay, 12, "M", BOX_W - 110, C.text)
+        row.name:SetPoint("TOPLEFT", 24, y - 1)
+        row.sub = W.Cell(overlay, 11, "R", BOX_W - 110, C.muted)
+        row.sub:SetPoint("TOPLEFT", 24, y - 17)
+        row.join = JoinButton(overlay)
+        row.join:SetPoint("TOPRIGHT", -10, y - 4)
+        overlay.rows[i] = row
     end
+    -- shown when there is nothing to join
+    overlay.empty = W.Cell(overlay, 12, "R", BOX_W - 34, C.muted)
+    overlay.empty:SetPoint("TOPLEFT", 24, -29)
+    overlay.emptyDot = W.Dot(overlay, 6)
+    overlay.emptyDot:SetPoint("TOPLEFT", 11, -34)
+    overlay.emptyDot:SetVertexColor(C.muted[1], C.muted[2], C.muted[3], 1)
 end
 
 local function RefreshOverlay()
@@ -1506,31 +1543,33 @@ local function RefreshOverlay()
     overlay:SetShown(ns.opt.showTracker)
     if not ns.opt.showTracker then return end
     overlay:SetScale(ns.opt.trackerScale)
-    overlay.layer:SetText(ns.currentLayer and ("layer " .. ns.LayerShort(ns.currentLayer)) or "")
+    local list, watched, here = Sightings()
+    overlay.zone:SetText(here or "")
     local shown = 0
-    for _, item in ipairs(SortedMobs()) do
-        if shown < MAX_ROWS then
-            shown = shown + 1
-            local row, st = overlay.rows[shown], item.st
-            local c = SC(st.code)
-            row.dot:SetVertexColor(c[1], c[2], c[3], 1)
-            row.name:SetText(item.def.name)
-            row.st:SetText(st.code == "OPEN" and ("Open " .. ns.Dur(st.sort)) or ShortStatus(st))
-            W.SetColor(row.st, c)
-            row.dot:Show(); row.name:Show(); row.st:Show()
+    for i, row in ipairs(overlay.rows) do
+        local s = list[i]
+        if s then
+            shown = i
+            row.name:SetText(s.def.name)
+            row.sub:SetText(s.host .. DOT .. (ns.Now() - s.at < 60 and "just now" or (ns.Dur(ns.Now() - s.at) .. " ago")))
+            row.dot:Show(); row.name:Show(); row.sub:Show()
+            if not row.join:Bind(s.def, s.st) then row.join:Hide() end
+        else
+            row.dot:Hide(); row.name:Hide(); row.sub:Hide(); row.join:Hide()
         end
     end
-    for i = shown + 1, MAX_ROWS do
-        local row = overlay.rows[i]
-        row.dot:Hide(); row.name:Hide(); row.st:Hide()
-    end
     if shown == 0 then
-        local row = overlay.rows[1]
-        row.name:SetText("Nothing tracked")
-        row.name:Show()
-        shown = 1
+        overlay.empty:SetText(watched == 0 and "None of your tracked rares live here"
+            or ("Watching " .. watched .. " here, nothing spotted yet"))
+        overlay.empty:Show(); overlay.emptyDot:Show()
+        overlay:SetHeight(54)
+    else
+        overlay.empty:Hide(); overlay.emptyDot:Hide()
+        if #list > MAX_ROWS then
+            overlay.rows[MAX_ROWS].sub:SetText(overlay.rows[MAX_ROWS].sub:GetText() .. DOT .. "+" .. (#list - MAX_ROWS) .. " more")
+        end
+        overlay:SetHeight(30 + shown * ROW_H)
     end
-    overlay:SetHeight(34 + shown * 20)
 end
 
 ---------------------------------------------------------------------------
