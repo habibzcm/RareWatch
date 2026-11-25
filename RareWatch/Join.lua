@@ -12,7 +12,7 @@
 --     are still on, from someone in the same zone; at most HOST_MAX joins per HOST_WINDOW seconds.
 --   * If the host is moved anyway, they are told, that guest is blocked for an hour, and the guest's count is
 --     set to full.
-local ADDON_NAME, ns = ...
+local _, ns = ...
 local W = ns.W
 local C = W.C
 local Hex = W.Hex
@@ -20,7 +20,7 @@ local DOT = "  \194\183  "
 
 local PREFIX, PROTO = "RareWatch", "3"
 local LIMIT, SAFE_USED, WARN_USED = 10, 8, 7     -- game limit per hour (Layer-Swap's reading), our cut-off, warn from
-local FRESH = 600                                -- a sighting can be joined for 10 minutes
+local FRESH = ns.FRESH or 600                    -- a sighting can be joined for 10 minutes
 local PROMPT_FOR = 120                           -- host has 2 minutes to accept
 local ASK_TIMEOUT = 8                            -- no reply at all in this time: offline or older RareWatch
 local INVITE_WAIT = 20                           -- accepted, but no invite arrived
@@ -48,30 +48,11 @@ local pausedUntil = 0             -- host: no requests until then
 ---------------------------------------------------------------------------
 local function Now() return ns.Now() end
 
-local function Clean(name) return (tostring(name or ""):gsub("[^%w_%-]", "")) end
-
--- Forever names have two parts ("Bluubs Tanockers"). UnitName gives only the first, but messages, whispers and
--- invites need the full name. So names are compared on their first part, and messages go to the full name.
-local function Short(name) return Ambiguate(tostring(name or ""), "short") end
-local function First(name) return Short(name):match("^[^%s]+") or "" end
-local function SameName(a, b)
-    if not a or not b then return false end
-    a, b = Short(a), Short(b)
-    return a == b or First(a) == First(b)
-end
--- Does a full name belong to the owner part of a layer key? (the key holds the first name, or older versions
--- the whole name squeezed to 12 characters)
-local function OwnerIs(name, owner)
-    if not name or owner == "" then return false end
-    return Clean(First(name)) == owner or Clean(Short(name)):sub(1, 12) == owner
-end
+-- Names: Forever names have two parts ("Bluubs Tanockers"); UnitName gives only the first, but messages,
+-- whispers and invites need the full name. The helpers live in Core.
+local Clean, SameName = ns.Clean, ns.SameName
 
 local function InGroup() return (IsInGroup and IsInGroup()) or (GetNumGroupMembers and GetNumGroupMembers() > 0) end
-
-local function InInstance()
-    local ok, inst = pcall(IsInInstance)
-    return ok and inst
-end
 
 local function Dead() return UnitIsDeadOrGhost and UnitIsDeadOrGhost("player") end
 
@@ -92,7 +73,7 @@ local function ZoneMap()
     return map
 end
 
-local function Send(to, ...)
+local function Whisper(to, ...)
     local msg = table.concat({ ... }, ":")
     pcall(C_ChatInfo.SendAddonMessage, PREFIX, msg, "WHISPER", to)
 end
@@ -131,6 +112,8 @@ function J.Used() return #Moves() end
 function J.PausedFor() return math.max(0, pausedUntil - Now()) end
 function J.Resume() pausedUntil = 0; ns.Changed() end
 function J.Limit() return LIMIT end
+function J.SafeUsed() return SAFE_USED end
+function J.WarnUsed() return WARN_USED end
 
 -- Seconds until one more move is allowed (0 when one is).
 function J.WaitFor()
@@ -270,33 +253,23 @@ end
 ---------------------------------------------------------------------------
 -- Who to ask for a layer record, or nil: the key is "<player>.<letter>" and the record's source names them.
 local function HostOf(st)
-    if type(st.layer) ~= "string" then return end
-    local owner, letter = st.layer:match("^([%w_%-]+)%.([%w_%-]+)$")
+    local owner, letter = ns.KeyOwner(st.layer)
     if not owner then return end
     local r = st.rec or {}
-    -- the full name: from the record, or failing that (relayed by someone else) from the users we've heard from
-    for _, src in ipairs({ r.seenSrc, r.spawnSrc, r.downSrc }) do
-        if OwnerIs(src, owner) then return Short(src), letter end
-    end
-    local best, bestT
-    for name, p in pairs(ns.peers or {}) do
-        if OwnerIs(name, owner) and (not bestT or (p.t or 0) > bestT) then best, bestT = name, p.t or 0 end
-    end
-    if best then return Short(best), letter end
-    if owner ~= "" then return owner, letter end
+    return ns.FullName(owner, r.seenSrc, r.downSrc) or owner, letter
 end
 
 -- Whether a layer record can be joined right now. Returns host, letter, or nil and why not.
 function J.CanJoin(def, st)
     if not def or not st or not st.rec then return nil, nil, "hide" end
     local r = st.rec
-    local seen = math.max(r.seen or 0, r.spawn or 0)
+    local seen = r.seen or 0
     if seen == 0 or (r.down and r.down >= seen) or Now() - seen > FRESH then return nil, nil, "hide" end
     local host, letter = HostOf(st)
     if not host or SameName(host, ns.me) then return nil, nil, "hide" end
     if state.mode ~= "idle" then return host, letter, "Already asking someone." end
     if InGroup() then return host, letter, "Leave your group first." end
-    if InInstance() then return host, letter, "Not inside an instance." end
+    if ns.InInstance() then return host, letter, "Not inside an instance." end
     if Dead() then return host, letter, "Not while you're dead." end
     if InCombat() then return host, letter, "Not in combat." end
     local wait = J.WaitFor()
@@ -336,7 +309,7 @@ function J.Request(def, st)
     if why then Result("Can't join yet", why, "warn", "info"); return end
     local nonce = tostring(math.random(100000, 999999))
     state = { mode = "asking", host = host, nonce = nonce, def = def, letter = letter, at = GetTime() }
-    Send(host, "J", PROTO, def.id or 0, Clean(letter), J.Used(), ZoneMap() or 0, nonce)
+    Whisper(host, "J", PROTO, def.id or 0, Clean(letter), J.Used(), ZoneMap() or 0, nonce)
     Show({ title = "Asking " .. host, tone = "wait", icon = "hourglass",
         body = "Asking to join " .. host .. "'s layer for " .. def.name .. ".",
         b2 = { text = "Cancel", onClick = function() J.Cancel() end } })
@@ -351,7 +324,7 @@ end
 
 function J.Cancel()
     if (state.mode == "asking" or state.mode == "waiting" or state.mode == "accepted") and state.host then
-        Send(state.host, "Q", PROTO, state.nonce)
+        Whisper(state.host, "Q", PROTO, state.nonce)
     end
     Reset()
     if bar then bar:Hide() end
@@ -448,7 +421,7 @@ local function HostCheck(who, id, letter, used, zone)
     if pausedUntil > Now() then return "PAUSED" end
     if (declined[who] or 0) > Now() then return "COOL", declined[who] - Now() end
     if not used or used >= SAFE_USED then return "SWAPS" end
-    if InInstance() then return "INST" end
+    if ns.InInstance() then return "INST" end
     if InGroup() then return "GROUP" end
     if state.mode ~= "idle" then return "BUSY" end
     if RecentInvites() >= HOST_MAX then return "LIMIT" end
@@ -459,16 +432,12 @@ local function HostCheck(who, id, letter, used, zone)
     if not cur or ns.layerStale then return "NOLAYER" end
     if Clean(ns.LayerShort(cur)):sub(1, 8) ~= letter then return "MOVED" end
     local r = def.layers and def.layers[cur]
-    local seen = r and math.max(r.seen or 0, r.spawn or 0) or 0
+    local seen = r and r.seen or 0
     if r and r.down and r.down >= seen and Now() - r.down < FRESH then return "DEAD" end
     if seen == 0 or Now() - seen > FRESH + 60 then return "OLD" end
     local mine = ZoneMap()
     if zone and zone > 0 and mine and zone ~= mine then return "ZONE" end
     return nil, def
-end
-
-local function HostDone()
-    Reset()
 end
 
 local function WatchHostMove(guest)
@@ -482,15 +451,15 @@ local function WatchHostMove(guest)
         if s.pulled then ticker:Cancel(); return end
         if not InGroupWith(guest) then
             ticker:Cancel()
-            HostDone()
+            Reset()
             Show({ title = guest .. " joined your layer", tone = "info", icon = "check", hideIn = 8,
                 body = "They've left your group again. Nothing else to do." })
         elseif el >= 30 then
             ticker:Cancel()
             Show({ title = guest .. " is still in your group", tone = "warn", icon = "users",
                 body = "They should be on your layer by now.",
-                b1 = { text = "Remove " .. guest, onClick = function() Uninvite(guest); if bar then bar:Hide() end; HostDone() end },
-                b2 = { text = "Keep", onClick = function() if bar then bar:Hide() end; HostDone() end } })
+                b1 = { text = "Remove " .. guest, onClick = function() Uninvite(guest); if bar then bar:Hide() end; Reset() end },
+                b2 = { text = "Keep", onClick = function() if bar then bar:Hide() end; Reset() end } })
         end
     end)
 end
@@ -500,7 +469,7 @@ local function HostPulled(s)
     s.pulled = true
     local guest = s.guest
     blocked[guest] = Now() + BLOCK_FOR
-    Send(guest, "j", PROTO, s.nonce, "PULLED")
+    Whisper(guest, "j", PROTO, s.nonce, "PULLED")
     Reset()
     Show({ title = "The game moved you to " .. guest .. "'s layer", tone = "bad", icon = "info",
         body = guest .. "'s layer moves for this hour were used up, so the game moved you instead of them. "
@@ -512,25 +481,25 @@ end
 local function HostRequest(who, id, letter, used, zone, nonce)
     local why, def = HostCheck(who, id, letter, used, zone)
     if why then
-        Send(who, "j", PROTO, nonce, why, why == "COOL" and math.floor(def) or 0)
+        Whisper(who, "j", PROTO, nonce, why, why == "COOL" and math.floor(def) or 0)
         return
     end
     prompts[#prompts + 1] = Now()
     state = { mode = "prompt", guest = who, nonce = nonce, def = def, untilT = GetTime() + PROMPT_FOR }
-    Send(who, "j", PROTO, nonce, "WAIT")
+    Whisper(who, "j", PROTO, nonce, "WAIT")
     if ns.opt.alertSound then pcall(PlaySound, 8960) end   -- ready check
     local s = state
     local function Decline()
         if state ~= s then return end
         declined[who] = Now() + DECLINE_COOL
-        Send(who, "j", PROTO, nonce, "NO")
+        Whisper(who, "j", PROTO, nonce, "NO")
         Reset()
         if bar then bar:Hide() end
     end
     local function Pause()
         if state ~= s then return end
         pausedUntil = Now() + PAUSE_FOR
-        Send(who, "j", PROTO, nonce, "PAUSED")
+        Whisper(who, "j", PROTO, nonce, "PAUSED")
         Reset()
         Result("Join requests paused", "No one can ask to join your layer for 15 minutes.", "info", "hourglass")
         ns.Changed()
@@ -538,12 +507,12 @@ local function HostRequest(who, id, letter, used, zone, nonce)
     local function Accept()
         if state ~= s then return end
         if InGroup() then
-            Send(who, "j", PROTO, nonce, "GROUP"); Reset()
+            Whisper(who, "j", PROTO, nonce, "GROUP"); Reset()
             Result("Not sent", "You're in a group now, so " .. who .. " can't be invited.", "warn")
             return
         end
         invites[#invites + 1] = Now()
-        Send(who, "j", PROTO, nonce, "OK")
+        Whisper(who, "j", PROTO, nonce, "OK")
         Invite(who)
         s.mode = "invited"
         Show({ title = "Invited " .. who, tone = "wait", icon = "hourglass",
@@ -567,17 +536,18 @@ local function HostRequest(who, id, letter, used, zone, nonce)
         b3 = { text = "Pause 15 min", onClick = Pause } })
     C_Timer.After(PROMPT_FOR, function()
         if state == s and s.mode == "prompt" then
-            Send(who, "j", PROTO, nonce, "EXP")
+            Whisper(who, "j", PROTO, nonce, "EXP")
             Reset()
             Result("Request expired", who .. "'s request to join your layer timed out.", "warn")
         end
     end)
 end
 
+-- The X on the bar. On the host's prompt it says no to this request only: unlike Decline, the player can ask
+-- again straight away.
 function J.Dismiss()
     if state.mode == "prompt" and state.guest then
-        declined[state.guest] = Now() + DECLINE_COOL
-        Send(state.guest, "j", PROTO, state.nonce, "NO")
+        Whisper(state.guest, "j", PROTO, state.nonce, "NO")
         Reset()
     elseif state.mode == "asking" or state.mode == "waiting" then
         J.Cancel()
@@ -651,7 +621,3 @@ function J.PrintSwaps()
     local w = J.WaitFor()
     if w > 0 then ns.Print("Join requests are paused for " .. ns.Dur(w) .. ".") end
 end
-
--- for tests
-J._state = function() return state end
-J._show = function(o) Show(o) end

@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.0
+RareWatch is rebuilt around one question: **is a rare in my zone up right now, on any layer another RareWatch user is on?** Layers can't be read from the player any more, only from the rare, so respawn timers per layer stopped meaning much. RareWatch now keeps layers behind the scenes and uses them for **Join**.
+
+- **Rares in your zone are watched automatically.** No need to track them. The **Track** button stays for rares in other zones: tracked rares are watched everywhere.
+- **New Rares page** (replaces Tracker). It lists this zone's rares, then the ones you track elsewhere. Each one shows what's known now: **Up** (someone sees it, with Join), **Seen** (seen earlier), **Killed** ("Killed by Bob, 40m ago") or **No reports**. The same four words are used in the status box, Browse and the minimap.
+- **The status box** lists every current sighting of a rare in your zone, including your own ("You see it"). When a rare is killed, the row changes to "Killed by …" for two minutes and then disappears. New option: **Hide the box when nothing is up**.
+- **One alert per sighting.** A rare that stays up used to be announced again every 5 minutes, and again for each player who saw it. Now you get one alert when it's spotted, and nothing more until it has gone quiet for 10 minutes. If another user's report already alerted you, seeing the rare yourself doesn't alert again.
+- Kills are one chat line, with no sound. Old news relayed late (an old kill, an old sighting) is not announced.
+- Rares elsewhere: you only hear about ones you track (chat line and sound, no big text).
+- **Mute** a rare with the bell on its page: it stays listed, with no alerts.
+- **"Message in chat" now covers all of RareWatch's chat messages.**
+- Fixed: walking past an old corpse logged a kill "just now" and shared it with everyone. Only a rare you saw alive counts now.
+- Fixed: calling a pet named after a rare logged a tame. A tame needs a new pet that is that rare, with the rare itself gone from view.
+- Closing someone's join request with **X** no longer blocks them for 10 minutes. Only **Decline** does.
+- Rares discovered in Forever are shared once after login and on resync, instead of with every sync (up to 40 messages each time).
+- Removed: respawn windows and timelines, "window opened" alerts, measured respawns and editing respawn times, Log kill / Log sighting, custom mobs, layer names and the layer rows, the "alert for untracked rares" and "read spawn time" settings, and `/rwatch kill|tame|seen|layer`. Settings that no longer exist are cleaned out of your saved data, and muted rares carry over.
+- Works with RareWatch 0.7.x users: kills, sightings and Join requests still go both ways.
+
 ## 0.7.2
 - **The status box now shows sightings you can join.** Respawn windows ("Due", "Window open") stopped meaning much once Forever removed layering, so the box shows your tracked rares that another RareWatch user spotted in your zone in the last 10 minutes instead. Each one shows who saw it and how long ago, with a **Join** button that asks them to bring you onto their layer.
 - The Join button stays visible but greyed out when you can't join right now (in a group, in combat, dead, or out of layer moves). Hover it to see why.

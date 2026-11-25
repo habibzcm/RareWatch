@@ -1,8 +1,8 @@
 ## Interface: 16001
 ## Title: RareWatch
-## Notes: Rare spawn tracker - kill, tame and sighting timers shared automatically between all users.
+## Notes: See when a rare in your zone is up on another RareWatch user's layer, and join them.
 ## Author: Habibz
-## Version: 0.7.2
+## Version: 0.8.0
 ## IconTexture: Interface\Icons\Ability_Hunter_BeastTaming
 ## SavedVariables: RareWatchDB
 

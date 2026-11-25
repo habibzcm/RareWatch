@@ -1,5 +1,5 @@
 -- RareWatch - UI: main window (sidebar + pages), status box, minimap button.
-local ADDON_NAME, ns = ...
+local _, ns = ...
 local W = ns.W
 local C = W.C
 local Hex = W.Hex
@@ -16,22 +16,16 @@ local LIST_W = 240
 local DW = CW - LIST_W
 local layouts = {}                                 -- per page: re-fit to the current size
 local DOT = "  \194\183  "
+local KILL_ROW_FOR = 120                           -- a kill shows in the status box this long
 
-local STATUS = {
-    UP    = { label = "Up",           color = C.green },
-    OPEN  = { label = "Window open",  color = C.yellow },
-    DUE   = { label = "Should be up", color = C.orange },
-    STALE = { label = "Seen earlier", color = C.stale },
-    WAIT  = { label = "Respawning",   color = C.blue },
-    NONE  = { label = "No data",      color = C.muted },
-}
-local function SC(code) return (STATUS[code] or STATUS.NONE).color end
+local STATUS_COLOR = { UP = C.green, SEEN = C.stale, KILLED = C.red, NONE = C.muted }
+local function SC(code) return STATUS_COLOR[code] or C.muted end
+local function Word(code) return ns.STATUS[code] or ns.STATUS.NONE end
 
 local EVENTS = {
     DOWN  = { label = "Killed",  color = C.red },
     TAME  = { label = "Tamed",   color = C.blue },
     SEEN  = { label = "Sighted", color = C.green },
-    SPAWN = { label = "Spawned", color = C.accent },
 }
 
 ---------------------------------------------------------------------------
@@ -48,63 +42,57 @@ local function RestorePos(frame, key, default)
     if pos then frame:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4]) else frame:SetPoint(unpack(default)) end
 end
 
-local function SortedMobs()
-    local out = {}
+local function Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
+local function EachRow(list, fn) for _, r in ipairs(list.rows) do fn(r) end end
+local function ItemKey(def) return def.id or ns.Key(def.name) end
+
+local function PageTitle(page, text)
+    local t = W.Text(page, 17, "M", text)
+    t:SetPoint("TOPLEFT", 20, -20)
+    return t
+end
+
+-- "Rare elite · level 41"
+-- "5 - 8 h", or "14.8 h" when the database has one value
+local function RespawnText(info)
+    if not (info and info.rmin and info.rmax) then return nil end
+    if ns.Hours(info.rmin) == ns.Hours(info.rmax) then return ns.Hours(info.rmin) .. " h" end
+    return ns.Hours(info.rmin) .. " - " .. ns.Hours(info.rmax) .. " h"
+end
+
+local function RankLine(info)
+    if not info then return "Rare" end
+    return (info.rank == 2 and "Rare elite" or "Rare") .. (info.minl and (DOT .. "level " .. info.minl) or "")
+end
+
+-- A rare's record holder, without creating one: the tracked entry, the shadow entry, or an empty stand-in.
+local function DefFor(info)
+    return ns.LookupAny(info.id, info.name, false) or { name = info.name, id = info.id, layers = {}, standIn = true }
+end
+
+-- The two groups the Rares page and the minimap list: this zone's rares, and tracked rares in other zones.
+-- Each item: { def, info, st, tracked }. Up first, then the newest news, then by name.
+local function ByState(a, b)
+    if a.st.prio ~= b.st.prio then return a.st.prio < b.st.prio end
+    if a.st.at ~= b.st.at then return a.st.at > b.st.at end
+    return a.def.name < b.def.name
+end
+local function Groups()
+    local zone = ns.Zone()
+    local here, elsewhere = {}, {}
+    for _, info in ipairs(ns.ZoneRares(zone)) do
+        local def = DefFor(info)
+        here[#here + 1] = { def = def, info = info, st = ns.Status(def), tracked = ns.Lookup(info.id, info.name) ~= nil }
+    end
     for _, def in ipairs(ns.list) do
-        local st, n = ns.Summary(def)
-        out[#out + 1] = { def = def, st = st, n = n }
+        local info = ns.RareInfo(def.id)
+        if not (info and info.zone and info.zone == zone) then
+            elsewhere[#elsewhere + 1] = { def = def, info = info, st = ns.Status(def), tracked = true }
+        end
     end
-    table.sort(out, function(a, b)
-        if a.st.prio ~= b.st.prio then return a.st.prio < b.st.prio end
-        if a.st.sort ~= b.st.sort then return a.st.sort < b.st.sort end
-        return a.def.name < b.def.name
-    end)
-    return out
-end
-
-local function SelectedDef()
-    local def = selectedKey and ns.byName[selectedKey]
-    if not def then
-        local first = SortedMobs()[1]
-        def = first and first.def
-        selectedKey = def and ns.Key(def.name)
-    end
-    return def
-end
-
--- Progress (0..1) through the current respawn phase, for cards and bars.
-local function Progress(def, st)
-    local t = ns.Now()
-    if st.code == "WAIT" then
-        local down = st.windowFrom - def.min
-        return math.max(0, math.min(1, (t - down) / def.min))
-    elseif st.code == "OPEN" then
-        return math.max(0, math.min(1, (t - st.windowFrom) / math.max(1, st.windowTo - st.windowFrom)))
-    elseif st.code == "NONE" then
-        return 0
-    end
-    return 1
-end
-
-local function ShortStatus(st)
-    if st.code == "WAIT" then return ns.Dur(st.sort)
-    elseif st.code == "OPEN" then return "Open"
-    elseif st.code == "DUE" then return "Due"
-    elseif st.code == "UP" then return "Up"
-    elseif st.code == "STALE" then return "Seen"
-    end
-    return "No data"
-end
-
-local function InfoLine(def, st)
-    local info = ns.RareInfo(def.id)
-    local parts = {}
-    if info and info.zone then parts[#parts + 1] = info.zone end
-    if st and st.layer then parts[#parts + 1] = "layer " .. ns.LayerShort(st.layer) end
-    if st and (st.code == "UP" or st.code == "STALE") and st.rec and st.rec.seen then
-        parts[#parts + 1] = ns.Dur(ns.Now() - st.rec.seen) .. " ago"
-    end
-    return table.concat(parts, DOT)
+    table.sort(here, ByState)
+    table.sort(elsewhere, ByState)
+    return here, elsewhere, zone
 end
 
 function ns.SetWaypoint(info)
@@ -124,9 +112,9 @@ function ns.SetWaypoint(info)
     return false, where .. "  (install TomTom for waypoints)"
 end
 
--- A small "Join" button for a fresh sighting by another player (see Join.lua).
-local function JoinButton(parent)
-    local b = W.Button(parent, { text = "Join", icon = "users", style = "accent", h = 22, size = 11 })
+-- A "Join" button for a fresh sighting by another player (see Join.lua).
+local function JoinButton(parent, big)
+    local b = W.Button(parent, { text = "Join", icon = "users", style = big and "primary" or "accent", h = big and 28 or 22, size = big and 12 or 11 })
     b:HookScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:SetText("Join " .. (self.host or "") .. "'s layer", 1, 1, 1)
@@ -148,7 +136,7 @@ local function JoinButton(parent)
     -- returns true when shown
     function b:Bind(def, st)
         local host, _, why
-        if ns.Join and def and st then host, _, why = ns.Join.CanJoin(def, st) end
+        if ns.Join and def and st and not def.standIn then host, _, why = ns.Join.CanJoin(def, st) end
         if not host or why == "hide" then self:Hide(); return false end
         self.def, self.st, self.host, self.why = def, st, host, why
         self:SetDisabled(why ~= nil)
@@ -159,19 +147,10 @@ local function JoinButton(parent)
     return b
 end
 
-local function Clamp(v, lo, hi) return math.max(lo, math.min(hi, v)) end
-local function EachRow(list, fn) for _, r in ipairs(list.rows) do fn(r) end end
-
-local function PageTitle(page, text)
-    local t = W.Text(page, 17, "M", text)
-    t:SetPoint("TOPLEFT", 20, -20)
-    return t
-end
-
 ---------------------------------------------------------------------------
--- Tracker page
+-- Rares page: this zone's rares and the ones you track elsewhere
 ---------------------------------------------------------------------------
-local function BuildTracker(page)
+local function BuildRares(page)
     -- left column
     local col = CreateFrame("Frame", nil, page)
     col:SetPoint("TOPLEFT", 0, 0)
@@ -179,61 +158,61 @@ local function BuildTracker(page)
     col:SetWidth(LIST_W)
     W.Rect(col, C.col)
 
-    local head = W.Text(col, 13, "M", "Tracking")
-    head:SetPoint("TOPLEFT", 16, -20)
-    local headCount = W.Text(col, 12, "R", "", C.muted, "RIGHT")
-    headCount:SetPoint("TOPRIGHT", -16, -21)
-
     local footer = W.Cell(col, 11, "R", LIST_W - 32, C.muted)
-    local LW, SX = 110, 134   -- layer column width / status x, set by the layout
     footer:SetPoint("BOTTOMLEFT", 16, 14)
 
-    local cards = W.List(col, MAX_H - 56 - 40, 62, function(list)
+    local ROW_H = 46
+    local cards = W.List(col, MAX_H - 20 - 40, ROW_H, function(list)
         local r = CreateFrame("Button", nil, list)
         r.bg = W.Round(r, C.card, 8)
         r.bg:SetColor(C.card, 0)
         r.name = W.Cell(r, 12, "M", 140)
-        r.name:SetPoint("TOPLEFT", 12, -11)
-        r.timer = W.Cell(r, 12, "M", 70, C.text, "RIGHT")
-        r.timer:SetPoint("TOPRIGHT", -12, -11)
+        r.name:SetPoint("TOPLEFT", 12, -9)
+        r.word = W.Cell(r, 11, "M", 70, C.text, "RIGHT")
+        r.word:SetPoint("TOPRIGHT", -12, -10)
         r.sub = W.Cell(r, 11, "R", 190, C.muted)
-        r.sub:SetPoint("TOPLEFT", 12, -28)
-        r.track = r:CreateTexture(nil, "ARTWORK")
-        r.track:SetColorTexture(C.track[1], C.track[2], C.track[3], 1)
-        r.track:SetPoint("BOTTOMLEFT", 12, 11)
-        r.track:SetPoint("BOTTOMRIGHT", -12, 11)
-        r.track:SetHeight(3)
-        r.fill = r:CreateTexture(nil, "OVERLAY")
-        r.fill:SetPoint("BOTTOMLEFT", r.track, "BOTTOMLEFT")
-        r.fill:SetHeight(3)
-        r:SetScript("OnEnter", function(self) if not self.selected then self.bg:SetColor(C.card, 0.5) end end)
-        r:SetScript("OnLeave", function(self) if not self.selected then self.bg:SetColor(C.card, 0) end end)
+        r.sub:SetPoint("TOPLEFT", 12, -26)
+        r.head = W.Cell(r, 11, "M", 190, C.muted)
+        r.head:SetPoint("BOTTOMLEFT", 12, 8)
+        r.headCount = W.Cell(r, 11, "R", 40, C.muted, "RIGHT")
+        r.headCount:SetPoint("BOTTOMRIGHT", -12, 8)
+        r:SetScript("OnEnter", function(self) if self.item.def and not self.selected then self.bg:SetColor(C.card, 0.5) end end)
+        r:SetScript("OnLeave", function(self) if self.item.def and not self.selected then self.bg:SetColor(C.card, 0) end end)
         r:SetScript("OnClick", function(self)
-            selectedKey = ns.Key(self.item.def.name)
+            if not self.item.def then return end
+            selectedKey = ItemKey(self.item.def)
             W.HidePopovers()
             ns.RefreshMain()
         end)
         return r
     end, function(r, item)
         r.item = item
+        local isHead = item.def == nil
+        r.head:SetShown(isHead); r.headCount:SetShown(isHead)
+        r.name:SetShown(not isHead); r.word:SetShown(not isHead); r.sub:SetShown(not isHead)
+        if isHead then
+            r.selected = false
+            r.bg:SetColor(C.card, 0)
+            r.head:SetText(item.head:upper())
+            r.headCount:SetText(item.count or "")
+            return
+        end
         local def, st = item.def, item.st
-        local c = SC(st.code)
-        r.selected = (ns.Key(def.name) == selectedKey)
+        r.selected = ItemKey(def) == selectedKey
         r.bg:SetColor(C.card, r.selected and 1 or 0)
+        local muted = ns.IsMuted(def)
         r.name:SetText(def.name)
-        r.timer:SetText(ShortStatus(st))
-        W.SetColor(r.timer, c)
-        local line = InfoLine(def, st)
-        if item.n > 1 then line = line .. "  +" .. (item.n - 1) end
-        r.sub:SetText(line ~= "" and line or "No reports yet")
-        local p = Progress(def, st)
-        local w = math.max(0, (LIST_W - 16 - 24) * p)
-        r.fill:SetShown(w >= 1)
-        r.fill:SetWidth(math.max(1, w))
-        r.fill:SetColorTexture(c[1], c[2], c[3], st.code == "STALE" and 0.5 or 1)
-    end, 4)
-    cards:SetPoint("TOPLEFT", 8, -48)
-    cards:SetPoint("TOPRIGHT", 0, -48)
+        W.SetColor(r.name, muted and C.sec or C.text)
+        r.word:SetText(Word(st.code))
+        W.SetColor(r.word, SC(st.code))
+        if st.code == "NONE" then
+            r.sub:SetText(RankLine(item.info) .. (item.tracked and item.info and item.info.zone and (DOT .. item.info.zone) or ""))
+        else
+            r.sub:SetText(ns.ReportText(st) .. DOT .. ns.Ago(st.at))
+        end
+    end, 2)
+    cards:SetPoint("TOPLEFT", 8, -10)
+    cards:SetPoint("TOPRIGHT", 0, -10)
 
     -- detail
     local d = CreateFrame("Frame", nil, page)
@@ -255,93 +234,52 @@ local function BuildTracker(page)
     pill.text:SetPoint("CENTER")
 
     local heroLabel = W.Text(d, 12, "R", "", C.sec)
-    heroLabel:SetPoint("TOPLEFT", PAD, -84)
-    local hero = W.Text(d, 30, "S", "")
-    hero:SetPoint("TOPLEFT", PAD, -102)
+    heroLabel:SetPoint("TOPLEFT", PAD, -86)
+    local hero = W.Cell(d, 24, "S", TW - 120)
+    hero:SetPoint("TOPLEFT", PAD, -104)
     local heroNote = W.Cell(d, 12, "R", TW, C.muted)
-    heroNote:SetPoint("TOPLEFT", PAD, -148)
+    heroNote:SetPoint("TOPLEFT", PAD, -138)
+    local bigJoin = JoinButton(d, true)
+    bigJoin:SetPoint("TOPRIGHT", -PAD, -104)
 
-    -- timeline
-    local tl = CreateFrame("Frame", nil, d)
-    tl:SetPoint("TOPLEFT", PAD, -148)
-    tl:SetSize(TW, 8)
-    tl.track = W.Round(tl, C.track2, 4)
-    tl.win = CreateFrame("Frame", nil, tl)
-    tl.win:SetHeight(8)
-    tl.win.bg = W.Round(tl.win, C.yellow, 4, "ARTWORK")
-    tl.now = tl:CreateTexture(nil, "OVERLAY")
-    tl.now:SetColorTexture(C.text[1], C.text[2], C.text[3], 1)
-    tl.now:SetSize(2, 18)
-    tl.l1 = W.Text(tl, 11, "R", "", C.muted)
-    tl.l1:SetPoint("TOPLEFT", tl, "BOTTOMLEFT", 0, -8)
-    tl.l2 = W.Text(tl, 11, "R", "", C.muted, "CENTER")
-    tl.l3 = W.Text(tl, 11, "R", "", C.muted, "RIGHT")
-    tl.l3:SetPoint("TOPRIGHT", tl, "BOTTOMRIGHT", 0, -8)
-
-    -- chips
-    local chip1 = W.Chip(d, "")
-    chip1:SetPoint("TOPLEFT", PAD, -192)
-    chip1:EnableMouse(true)
-    local chip2 = W.Chip(d, "")
-    chip2:SetPoint("LEFT", chip1, "RIGHT", 8, 0)
-    chip2:EnableMouse(true)
-    local editResp = W.Button(d, { icon = "pencil", w = 22, h = 22, style = "ghost",
-        tip = { "Edit respawn time", "Set the min/max respawn, or use the measured times." } })
-    editResp:SetPoint("LEFT", chip2, "RIGHT", 4, 0)
-    chip1:SetScript("OnLeave", function() GameTooltip:Hide() end)
-    chip2:SetScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_TOP")
-        GameTooltip:SetText("Measured respawns", 1, 1, 1)
-        GameTooltip:AddLine("Time from a reported kill or tame to the next spawn on the same layer. Upper bounds come from sightings, exact ones from spawn times.", 0.75, 0.77, 0.8, true)
-        GameTooltip:Show()
-    end)
-    chip2:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-    -- layers
-    -- layers / drops tabs
-    local detailTab = "layers"
-    local tabLayers = W.Button(d, { text = "Layers", h = 24, size = 11 })
-    tabLayers:SetPoint("TOPLEFT", PAD, -232)
+    -- reports / drops tabs
+    local detailTab = "reports"
+    local tabReports = W.Button(d, { text = "Reports", h = 24, size = 11 })
+    tabReports:SetPoint("TOPLEFT", PAD, -172)
     local tabDrops = W.Button(d, { text = "Drops", icon = "sparkles", h = 24, size = 11 })
-    tabDrops:SetPoint("LEFT", tabLayers, "RIGHT", 6, 0)
-    local layersHead = tabLayers
-    local dropNote = W.Text(d, 10, "R", "Vanilla loot data. Forever may differ.", C.muted, "RIGHT")
-    local layerList
-    layerList = W.List(d, 24 * 28, 28, function(list)
+    tabDrops:SetPoint("LEFT", tabReports, "RIGHT", 6, 0)
+    local dropNote = W.Text(d, 10, "R", "", C.muted, "RIGHT")
+    dropNote:SetPoint("TOPRIGHT", -PAD + 8, -178)
+
+    local LIST_Y = -206
+    local reportList
+    reportList = W.List(d, 24 * 30, 30, function(list)
         local r = CreateFrame("Frame", nil, list)
         r.dot = W.Dot(r, 7)
         r.dot:SetPoint("LEFT", 0, 0)
-        r.layer = W.Cell(r, 12, "M", 80)
-        r.layer:SetPoint("LEFT", 16, 0)
-        r.status = W.Cell(r, 12, "R", 200, C.sec)
-        r.status:SetPoint("LEFT", 136, 0)
-        r.src = W.Cell(r, 11, "R", 80, C.muted, "RIGHT")
-        r.src:SetPoint("RIGHT", 0, 0)
+        r.text = W.Cell(r, 12, "M", 260)
+        r.text:SetPoint("LEFT", 16, 0)
+        r.when = W.Cell(r, 11, "R", 160, C.muted, "RIGHT")
+        r.when:SetPoint("RIGHT", 0, 0)
         r.join = JoinButton(r)
         r.join:SetPoint("RIGHT", 0, 0)
         r.sep = W.Line(r)
         r.sep:SetPoint("BOTTOMLEFT")
         r.sep:SetPoint("BOTTOMRIGHT")
         return r
-    end, function(r, st, idx)
-        local c = SC(st.code)
+    end, function(r, rep, idx)
+        local c = SC(rep.code)
         r.dot:SetVertexColor(c[1], c[2], c[3], 1)
-        local isMe = st.layer == ns.LayerFor(SelectedDef())
-        r.layer:SetText(ns.LayerShort(st.layer) .. (isMe and ("  " .. Hex(C.accent) .. "your layer|r") or ""))
-        r.layer:SetWidth(LW)
-        local txt = st.text:sub(1, 1):upper() .. st.text:sub(2)
-        if st.code == "WAIT" or st.code == "OPEN" then
-            txt = txt .. Hex(C.muted) .. "   " .. ns.Clock(st.windowFrom) .. " - " .. ns.Clock(st.windowTo) .. "|r"
-        end
-        r.status:SetText(txt)
-        r.src:SetText(st.src and ("by " .. st.src) or "")
-        local joinable = r.join:Bind(SelectedDef(), st)
-        r.src:ClearAllPoints()
-        r.src:SetPoint("RIGHT", joinable and -(r.join:GetWidth() + 10) or 0, 0)
-        r.sep:SetShown(idx < #layerList.data)
+        r.text:SetText(ns.ReportText(rep))
+        W.SetColor(r.text, rep.code == "UP" and C.text or C.text2)
+        r.when:SetText(ns.Ago(rep.at) .. DOT .. ns.Day(rep.at))
+        local joinable = r.join:Bind(r.def, rep)
+        r.when:ClearAllPoints()
+        r.when:SetPoint("RIGHT", joinable and -(r.join:GetWidth() + 10) or 0, 0)
+        r.sep:SetShown(idx < #reportList.data)
     end)
-    layerList:SetPoint("TOPLEFT", PAD, -248)
-    layerList:SetPoint("TOPRIGHT", -PAD + 8, -248)
+    reportList:SetPoint("TOPLEFT", PAD, LIST_Y)
+    reportList:SetPoint("TOPRIGHT", -PAD + 8, LIST_Y)
 
     local dropList
     dropList = W.List(d, 28 * 24, 24, function(list)
@@ -395,24 +333,15 @@ local function BuildTracker(page)
             r.name:SetText("|cff" .. ns.QualityHex(row.q) .. row.name .. "|r" .. (row.quest and ("  " .. Hex(C.muted) .. "quest|r") or "") .. ((row.seen or row.wh) and ("  " .. Hex(C.accent) .. (row.seen and "seen|r" or "new|r")) or ""))
             r.pct:SetText(string.format("%g%%", row.pct)); W.SetColor(r.pct, row.pct >= 25 and C.accent or C.sec)
             local worth, src = ns.ItemWorth(row.id)
-            if worth then
-                r.val:SetText(Hex(C.text2) .. ns.CoinText(worth) .. "|r  " .. src)
-            else
-                r.val:SetText("")
-            end
+            r.val:SetText(worth and (Hex(C.text2) .. ns.CoinText(worth) .. "|r  " .. src) or "")
             W.SetColor(r.val, C.muted)
         end
     end, 0)
-    dropList:SetPoint("TOPLEFT", PAD, -248)
-    dropList:SetPoint("TOPRIGHT", -PAD + 8, -248)
+    dropList:SetPoint("TOPLEFT", PAD, LIST_Y)
+    dropList:SetPoint("TOPRIGHT", -PAD + 8, LIST_Y)
 
-    local function SetTab(t)
-        detailTab = t
-        ns.RefreshMain()
-    end
-    ns.SetDetailTab = SetTab
-    tabLayers:SetScript("OnClick", function() SetTab("layers") end)
-    tabDrops:SetScript("OnClick", function() SetTab("drops") end)
+    tabReports:SetScript("OnClick", function() detailTab = "reports"; ns.RefreshMain() end)
+    tabDrops:SetScript("OnClick", function() detailTab = "drops"; ns.RefreshMain() end)
 
     -- actions
     local feedback = W.Cell(d, 11, "R", TW, C.muted)
@@ -425,133 +354,40 @@ local function BuildTracker(page)
         C_Timer.After(6, function() if tok == fbToken then feedback:SetText("") end end)
     end
 
-    local logKill = W.Button(d, { text = "Log kill", icon = "skull", style = "primary" })
-    logKill:SetPoint("BOTTOMLEFT", PAD, 20)
-    local logSeen = W.Button(d, { text = "Log sighting", icon = "eye" })
-    logSeen:SetPoint("LEFT", logKill, "RIGHT", 8, 0)
+    local current   -- the item shown
+    local track = W.Button(d, { text = "Track", icon = "plus", style = "primary", onClick = function()
+        if not current then return end
+        local def = current.def
+        if current.tracked then
+            ns.RemoveMob(def)
+            Feedback(true, "Stopped tracking " .. def.name .. ".")
+        else
+            local nd = ns.TrackRare(def.id)
+            if nd then Feedback(true, "Tracking " .. nd.name .. ": you'll hear about it in any zone.") end
+        end
+        ns.RefreshMain()
+    end })
+    track:SetPoint("BOTTOMLEFT", PAD, 20)
+    track:HookScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText(current and current.tracked and "Stop tracking" or "Track", 1, 1, 1)
+        GameTooltip:AddLine("Rares in the zone you're in are always watched. Tracking keeps one watched in every zone, so you hear when another RareWatch user sees it.", 0.75, 0.77, 0.8, true)
+        GameTooltip:Show()
+    end)
+    track:HookScript("OnLeave", function() GameTooltip:Hide() end)
     local waypoint = W.Button(d, { text = "Waypoint", icon = "pin", onClick = function()
-        local def = SelectedDef()
-        local info = def and ns.RareInfo(def.id)
+        local info = current and current.info
         if info and info.coords and info.coords[1] then Feedback(ns.SetWaypoint(info)) end
     end })
-    waypoint:SetPoint("LEFT", logSeen, "RIGHT", 8, 0)
-
-    local untrack = W.ConfirmButton(d, { icon = "trash", w = 28, h = 28, style = "ghost", confirmText = "",
-        tip = { "Stop tracking", "Click twice to remove this mob from your list." } }, function()
-        local def = SelectedDef()
-        if def then
-            ns.RemoveMob(def)
-            selectedKey = nil
-            ns.RefreshMain()
-        end
-    end)
-    untrack:SetPoint("BOTTOMRIGHT", -PAD, 20)
+    waypoint:SetPoint("LEFT", track, "RIGHT", 8, 0)
     local bell = W.Button(d, { icon = "bell", w = 28, h = 28, style = "ghost", onClick = function()
-        local def = SelectedDef()
-        if not def then return end
-        def.alert = not def.alert
-        Feedback(true, def.alert and ("Alerts on for " .. def.name) or ("Alerts off for " .. def.name))
-        ns.Changed()
-    end, tip = { "Alerts", "Toggle pop-up, sound and flash when this mob is spotted." } })
-    bell:SetPoint("RIGHT", untrack, "LEFT", -4, 0)
-
-    -- log popover
-    local pop = W.Popover("RareWatchLogPopover", 280, 156)
-    local popTitle = W.Text(pop, 13, "M", "Log kill")
-    popTitle:SetPoint("TOPLEFT", 16, -16)
-    local kind = "DOWN"
-    local kindKill, kindTame
-    kindTame = W.ToggleChip(pop, "Tame", function() return kind == "TAME" end, function() kind = "TAME"; pop.Sync() end)
-    kindKill = W.ToggleChip(pop, "Kill", function() return kind == "DOWN" end, function() kind = "DOWN"; pop.Sync() end)
-    kindTame:SetPoint("TOPRIGHT", -16, -10)
-    kindKill:SetPoint("RIGHT", kindTame, "LEFT", -4, 0)
-    local mins = W.Field(pop, "Minutes ago", 116, "0 = now")
-    mins:SetPoint("TOPLEFT", 16, -66)
-    mins:SetMaxLetters(5)
-    local layerIn = W.Field(pop, "Layer", 116, "?")
-    layerIn:SetPoint("LEFT", mins, "RIGHT", 16, 0)
-    local popSave = W.Button(pop, { text = "Save", style = "primary", w = 80, onClick = function()
-        local def = SelectedDef()
-        if not def then return end
-        local ok, msg = ns.ManualLog(def, kind, mins:GetText(), layerIn:GetText())
-        Feedback(ok, msg)
-        if ok then pop:Hide() end
-    end })
-    popSave:SetPoint("BOTTOMRIGHT", -16, 14)
-    local popCancel = W.Button(pop, { text = "Cancel", style = "ghost", w = 70, onClick = function() pop:Hide() end })
-    popCancel:SetPoint("RIGHT", popSave, "LEFT", -6, 0)
-    mins.onEnter = function() popSave:Click() end
-    layerIn.onEnter = mins.onEnter
-    function pop.Sync()
-        popTitle:SetText(kind == "DOWN" and "Log kill" or kind == "TAME" and "Log tame" or "Log sighting")
-        kindKill:SetShown(kind ~= "SEEN")
-        kindTame:SetShown(kind ~= "SEEN")
-        kindKill:Refresh()
-        kindTame:Refresh()
-    end
-    pop.onOpen = function()
-        mins:SetText("")
-        layerIn:SetText("")
-        local lf = ns.LayerFor(SelectedDef())
-        layerIn:SetPlaceholder(lf and ns.LayerShort(lf) or "?")
-        pop.Sync()
-    end
-    logKill:SetScript("OnClick", function(self)
-        if pop:IsShown() and kind ~= "SEEN" then pop:Hide() return end
-        kind = "DOWN"
-        pop:Open(self, "BOTTOMLEFT", "TOPLEFT", 0, 8)
-    end)
-    logSeen:SetScript("OnClick", function(self)
-        if pop:IsShown() and kind == "SEEN" then pop:Hide() return end
-        kind = "SEEN"
-        pop:Open(self, "BOTTOMLEFT", "TOPLEFT", 0, 8)
-    end)
-
-    -- respawn popover
-    local rp = W.Popover("RareWatchRespawnPopover", 280, 170)
-    W.Text(rp, 13, "M", "Respawn time"):SetPoint("TOPLEFT", 16, -16)
-    local rMin = W.Field(rp, "Min hours", 116, "8")
-    rMin:SetPoint("TOPLEFT", 16, -62)
-    local rMax = W.Field(rp, "Max hours", 116, "12")
-    rMax:SetPoint("LEFT", rMin, "RIGHT", 16, 0)
-    local rNote = W.Cell(rp, 11, "R", 248, C.muted)
-    rNote:SetPoint("TOPLEFT", 16, -100)
-    local useMeasured = W.Button(rp, { text = "Use measured", onClick = function()
-        local def = SelectedDef()
-        if not def then return end
-        local ok, msg = ns.ApplyMeasured(def)
-        Feedback(ok, msg)
-        if ok then rp:Hide() end
-    end })
-    useMeasured:SetPoint("BOTTOMLEFT", 16, 14)
-    local rSave = W.Button(rp, { text = "Save", style = "primary", w = 70, onClick = function()
-        local def = SelectedDef()
-        if not def then return end
-        local a, b = tonumber(rMin:GetText()), tonumber(rMax:GetText())
-        local res, err = ns.AddMob(def.name, def.id, a and a * 3600, b and b * 3600)
-        if res then
-            res.respawnSrc = "your setting"
-            Feedback(true, "Respawn updated.")
-            rp:Hide()
-        else
-            rNote:SetText(Hex(C.red) .. err .. "|r")
-        end
-    end })
-    rSave:SetPoint("BOTTOMRIGHT", -16, 14)
-    rMax.onEnter = function() rSave:Click() end
-    rp.onOpen = function()
-        local def = SelectedDef()
-        if not def then rp:Hide() return end
-        rMin:SetText(ns.Hours(def.min))
-        rMax:SetText(ns.Hours(def.max))
-        local ms = ns.SampleStats(def)
-        useMeasured:SetDisabled(not ms or ms.n < 3)
-        rNote:SetText(ms and string.format("Measured %dx: %s - %s", ms.n, ns.Dur(ms.min), ns.Dur(ms.max))
-            or "No measured respawns yet.")
-    end
-    editResp:SetScript("OnClick", function(self)
-        if rp:IsShown() then rp:Hide() else rp:Open(self, "TOPLEFT", "BOTTOMLEFT", 0, -6) end
-    end)
+        if not current then return end
+        local def = current.def
+        local mute = not ns.IsMuted(def)
+        ns.SetMuted(def, mute)
+        Feedback(true, mute and ("Muted " .. def.name .. ": still listed, but no alerts.") or ("Alerts on for " .. def.name .. "."))
+    end, tip = { "Mute", "Turns off the sound, text and chat alerts for this rare. It stays listed." } })
+    bell:SetPoint("BOTTOMRIGHT", -PAD, 20)
 
     local emptyHint = W.Text(d, 12, "R", "", C.muted, "CENTER")
     emptyHint:SetPoint("CENTER", 0, 20)
@@ -560,28 +396,22 @@ local function BuildTracker(page)
     emptyHint:SetJustifyV("TOP")
     local browseBtn = W.Button(d, { text = "Browse rares", icon = "search", style = "primary", onClick = function() ns.ShowPage(2) end })
     browseBtn:SetPoint("TOP", emptyHint, "BOTTOM", 0, -14)
-    local detailParts = { name, meta, pill, heroLabel, hero, heroNote, tl, chip1, chip2, editResp, layersHead,
-        layerList, dropList, dropNote, tabDrops, logKill, logSeen, waypoint, untrack, bell, feedback }
+    local detailParts = { name, meta, pill, heroLabel, hero, heroNote, tabReports, tabDrops, dropNote,
+        reportList, dropList, track, waypoint, bell, feedback }
 
     layouts[1] = function()
-        LIST_W = Clamp(math.floor(CW * 0.27), 240, 340)
+        LIST_W = Clamp(math.floor(CW * 0.3), 240, 360)
         col:SetWidth(LIST_W)
         d:ClearAllPoints()
         d:SetPoint("TOPLEFT", LIST_W, 0)
         d:SetPoint("BOTTOMRIGHT", 0, 0)
         footer:SetWidth(LIST_W - 32)
         local cw = LIST_W - 16 - 24
-        EachRow(cards, function(r) r.name:SetWidth(cw - 76); r.sub:SetWidth(cw) end)
+        EachRow(cards, function(r) r.name:SetWidth(cw - 76); r.sub:SetWidth(cw); r.head:SetWidth(cw - 44) end)
         DW = CW - LIST_W
         TW = DW - PAD * 2
-        local RW = TW + 8 - 8               -- layer/drop row width
-        LW = Clamp(math.floor(RW * 0.24), 110, 220)
-        SX = 16 + LW + 10
-        local statusW = Clamp(math.floor((RW - SX) * 0.6), 180, 420)
-        EachRow(layerList, function(r)
-            r.status:ClearAllPoints(); r.status:SetPoint("LEFT", SX, 0); r.status:SetWidth(statusW)
-            r.src:SetWidth(math.max(80, RW - SX - statusW - 12))
-        end)
+        local RW = TW
+        EachRow(reportList, function(r) r.text:SetWidth(math.max(200, RW - 16 - 160 - 80)) end)
         local nameW = math.max(236, RW - 56 - 124 - 12)
         EachRow(dropList, function(r)
             r.name:SetWidth(nameW)
@@ -589,152 +419,128 @@ local function BuildTracker(page)
         end)
         name:SetWidth(TW - 140)
         meta:SetWidth(TW - 40)
+        hero:SetWidth(TW - 120)
         heroNote:SetWidth(TW)
-        tl:SetWidth(TW)
         feedback:SetWidth(TW)
-        cards:Fit(CH - 56 - 40)
+        cards:Fit(CH - 10 - 40)
+        local listH = CH + LIST_Y - 74          -- room down to the action buttons
+        reportList:Fit(listH)
+        dropList:Fit(listH)
     end
     layouts[1]()
 
     refreshers[1] = function()
-        local mobs = SortedMobs()
-        cards:SetData(mobs, "")
-        headCount:SetText(#mobs > 0 and tostring(#mobs) or "")
-        local online = ns.OnlineUsers()
-        local syncText
-        if GetChannelName(ns.CHANNEL) > 0 or ns.IsSharing() then
-            syncText = Hex(C.accent) .. "Live|r" .. DOT .. (online == 1 and "1 other user online" or (online .. " other users online"))
-        else
-            syncText = Hex(C.orange) .. "Not connected|r - click Connect in Settings"
+        local here, elsewhere, zone = Groups()
+        local items = {}
+        items[#items + 1] = { head = zone or "This zone", count = #here > 0 and tostring(#here) or "" }
+        for _, it in ipairs(here) do items[#items + 1] = it end
+        if #elsewhere > 0 then
+            items[#items + 1] = { head = "Tracked elsewhere", count = tostring(#elsewhere) }
+            for _, it in ipairs(elsewhere) do items[#items + 1] = it end
         end
-        footer:SetText("Layer " .. (ns.currentLayer and ns.LayerShort(ns.currentLayer) or "?")
-            .. (ns.currentLayerZone and (" (" .. ns.currentLayerZone .. ")") or "") .. DOT .. syncText)
+        -- keep the selection on the same rare; otherwise pick the first
+        current = nil
+        for _, it in ipairs(items) do if it.def and ItemKey(it.def) == selectedKey then current = it; break end end
+        if not current then
+            for _, it in ipairs(items) do if it.def then current = it; break end end
+            selectedKey = current and ItemKey(current.def)
+        end
+        cards:SetData(items, "")
 
-        local def = SelectedDef()
-        for _, f in ipairs(detailParts) do f:SetShown(def ~= nil) end
-        emptyHint:SetShown(def == nil)
-        browseBtn:SetShown(def == nil)
-        if not def then
-            emptyHint:SetText("You're not tracking anything yet.\nPick rares from the built-in list to get timers and alerts.")
+        local online = ns.OnlineUsers()
+        if GetChannelName(ns.CHANNEL) > 0 or ns.IsSharing() then
+            footer:SetText(Hex(C.accent) .. "Live|r" .. DOT .. (online == 1 and "1 other user online" or (online .. " other users online")))
+        else
+            footer:SetText(Hex(C.orange) .. "Not connected|r - click Connect in Settings")
+        end
+
+        for _, f in ipairs(detailParts) do f:SetShown(current ~= nil) end
+        emptyHint:SetShown(current == nil)
+        browseBtn:SetShown(current == nil)
+        if not current then
+            bigJoin:Hide()
+            emptyHint:SetText((zone and ("No known rares in " .. zone .. ".") or "No known rares here.")
+                .. "\nRares you track show here from any zone.")
             return
         end
 
+        local def, info, st = current.def, current.info, current.st
         name:SetText(def.name)
-        local info = ns.RareInfo(def.id)
-        local parts = {}
-        if info then
-            parts[#parts + 1] = (info.rank == 2 and "Rare elite" or "Rare") .. (info.minl and (DOT .. "level " .. info.minl) or "")
-            if info.zone then
-                parts[#parts + 1] = info.zone .. ((info.coords and info.coords[1]) and (" " .. info.coords[1] .. ", " .. info.coords[2]) or "")
-            end
-        else
-            parts[#parts + 1] = def.id and ("NPC " .. def.id) or "Custom mob"
+        local parts = { RankLine(info) }
+        if info and info.zone then
+            parts[#parts + 1] = info.zone .. ((info.coords and info.coords[1]) and (" " .. info.coords[1] .. ", " .. info.coords[2]) or "")
         end
+        if ns.IsMuted(def) then parts[#parts + 1] = Hex(C.muted) .. "Muted|r" end
         meta:SetText(table.concat(parts, DOT))
 
-        local st = ns.Summary(def)
         local c = SC(st.code)
-        pill.text:SetText(STATUS[st.code].label)
+        pill.text:SetText(Word(st.code))
         W.SetColor(pill.text, c)
         pill.bg:SetColor(W.Mix(C.bg, c, 0.18))
         pill:SetWidth(math.floor(pill.text:GetStringWidth() + 24.5))
 
-        local t = ns.Now()
-        local showTimeline = st.windowFrom ~= nil
-        tl:SetShown(showTimeline)
-        heroNote:SetShown(not showTimeline)
-        W.SetColor(hero, C.text)
-        local layerTag = st.layer and (DOT .. "layer " .. ns.LayerShort(st.layer)) or ""
-        if st.code == "WAIT" then
-            heroLabel:SetText("Window opens in" .. layerTag)
-            hero:SetText(ns.Dur(st.sort))
-        elseif st.code == "OPEN" then
-            heroLabel:SetText("Window closes in" .. layerTag)
-            hero:SetText(ns.Dur(st.sort))
-            W.SetColor(hero, C.yellow)
-        elseif st.code == "DUE" then
-            heroLabel:SetText("Respawn window ended" .. layerTag)
-            hero:SetText(ns.Dur(st.sort) .. " ago")
-            W.SetColor(hero, C.orange)
-        elseif st.code == "UP" or st.code == "STALE" then
-            heroLabel:SetText("Last seen alive" .. layerTag)
-            hero:SetText(st.rec and st.rec.seen and (ns.Dur(t - st.rec.seen) .. " ago") or "Up")
-            W.SetColor(hero, c)
-            heroNote:SetText(st.rec and st.rec.spawn and ("Spawned " .. ns.Dur(t - st.rec.spawn) .. " ago")
-                or (st.code == "STALE" and "It may have been killed since." or ""))
-        else
+        if st.code == "NONE" then
             heroLabel:SetText("No reports yet")
             hero:SetText("--")
             W.SetColor(hero, C.muted)
-            heroNote:SetText("Kills, tames and sightings from you or other users show up here.")
-        end
-
-        if showTimeline then
-            local down = st.windowFrom - def.min
-            local span = def.max * ((st.code == "DUE") and 1.12 or 1)
-            local function X(tt) return math.max(0, math.min(TW, (tt - down) / span * TW)) end
-            local wx, wr = X(st.windowFrom), X(st.windowTo)
-            tl.win:ClearAllPoints()
-            tl.win:SetPoint("LEFT", tl, "LEFT", wx, 0)
-            tl.win:SetWidth(math.max(8, wr - wx))
-            local wc = (st.code == "OPEN") and C.yellow or (st.code == "DUE" and C.orange or C.blue)
-            tl.win.bg:SetColor(W.Mix(C.track2, wc, 0.45))
-            tl.now:ClearAllPoints()
-            tl.now:SetPoint("CENTER", tl, "LEFT", X(t), 0)
-            tl.l1:SetText(((st.rec and st.rec.downKind == "TAME") and "Tamed " or "Killed ") .. ns.Clock(down))
-            tl.l2:SetText("Opens " .. ns.Clock(st.windowFrom))
-            tl.l2:ClearAllPoints()
-            tl.l2:SetPoint("TOP", tl, "BOTTOMLEFT", math.max(90, math.min(TW - 90, wx)), -8)
-            tl.l3:SetText("Closes " .. ns.Clock(st.windowTo))
-        end
-
-        chip1:SetText("Respawn " .. ns.Hours(def.min) .. " - " .. ns.Hours(def.max) .. " h")
-        local ms = ns.SampleStats(def)
-        if ms then
-            chip2:SetText("Measured " .. ms.n .. "x" .. DOT .. ns.Dur(ms.min) .. " - " .. ns.Dur(ms.max), C.text2)
+            heroNote:SetText("When you or another RareWatch user sees or kills it, it shows here.")
         else
-            chip2:SetText("Not measured yet", C.muted)
+            heroLabel:SetText(st.code == "UP" and "Up now" or (st.code == "SEEN" and "Last seen alive" or (st.kind == "TAME" and "Last tamed" or "Last killed")))
+            hero:SetText(ns.ReportText(st))
+            W.SetColor(hero, st.code == "UP" and C.green or C.text)
+            local note = ns.Ago(st.at) .. DOT .. ns.Day(st.at)
+            if st.code == "SEEN" then
+                note = note .. DOT .. "it may have been killed since"
+            elseif st.code == "KILLED" and info and info.rmin and info.rmax and info.rmax > 0 then
+                note = note .. DOT .. "respawns in about " .. RespawnText(info)
+            end
+            heroNote:SetText(note)
         end
+        if not bigJoin:Bind(def, st) then bigJoin:Hide() end
 
-        local y0 = showTimeline and -192 or ((heroNote:GetText() or "") ~= "" and -178 or -156)
-        chip1:ClearAllPoints()
-        chip1:SetPoint("TOPLEFT", PAD, y0)
-        layersHead:ClearAllPoints()
-        layersHead:SetPoint("TOPLEFT", PAD, y0 - 40)
-        local listH = CH + (y0 - 72) - 74          -- room down to the action buttons
-        for _, lst in ipairs({ layerList, dropList }) do
-            lst:ClearAllPoints()
-            lst:SetPoint("TOPLEFT", PAD, y0 - 72)
-            lst:SetPoint("TOPRIGHT", -PAD + 8, y0 - 72)
-            lst:Fit(listH)
-        end
-        dropNote:ClearAllPoints()
-        dropNote:SetPoint("TOPRIGHT", -PAD + 8, y0 - 46)
-
-        local L = ns.Layers(def, true)
-        local real = 0
-        for _, st in ipairs(L) do if not st.empty then real = real + 1 end end
-        tabLayers:SetLabel("Layers" .. (real > 0 and ("  " .. real) or ""))
-        tabLayers:SetStyle(detailTab == "layers" and "accent" or "default")
+        local reps = (st.code == "NONE") and {} or select(2, ns.Status(def))
+        for _, rep in ipairs(reps) do rep.def = def end
+        EachRow(reportList, function(r) r.def = def end)
+        tabReports:SetLabel("Reports" .. (#reps > 0 and ("  " .. #reps) or ""))
+        tabReports:SetStyle(detailTab == "reports" and "accent" or "default")
         tabDrops:SetStyle(detailTab == "drops" and "accent" or "default")
-        layerList:SetShown(detailTab == "layers")
+        reportList:SetShown(detailTab == "reports")
         dropList:SetShown(detailTab == "drops")
+        local rows = ns.DropRows(def.id)
         dropNote:SetText(ns.DropsSeen(def.id) and "Forever rates: ForeverDB.net data + small samples" or "Vanilla loot data. Forever may differ.")
-        dropNote:SetShown(detailTab == "drops" and ns.DropRows(def.id) ~= nil)
-        if detailTab == "layers" then
-            layerList:SetData(L, "No layer reports yet")
+        dropNote:SetShown(detailTab == "drops" and rows ~= nil)
+        if detailTab == "reports" then
+            reportList:SetData(reps, "")
         else
-            local rows = ns.DropRows(def.id)
-            dropList:SetData(rows or {}, rows and "No drop data." or "No drop data for this mob.")
+            dropList:SetData(rows or {}, "No drop data for this rare.")
         end
+
+        if current.tracked then
+            track:SetLabel("Tracking"); track:SetIcon("check"); track:SetStyle("default")
+        else
+            track:SetLabel("Track"); track:SetIcon("plus"); track:SetStyle("primary")
+        end
+        track:SetShown(def.id ~= nil and ns.RareInfo(def.id) ~= nil or current.tracked)
         waypoint:SetShown(info and info.coords and info.coords[1] and true or false)
-        W.SetColor(bell.icon, def.alert and C.accent or C.muted)
+        W.SetColor(bell.icon, ns.IsMuted(def) and C.muted or C.accent)
     end
 end
 
 ---------------------------------------------------------------------------
 -- Browse page
 ---------------------------------------------------------------------------
+-- What the Browse list and its tooltip say about a rare's state.
+local function BrowseState(info)
+    local any = ns.LookupAny(info.id, info.name, false)
+    local st = any and ns.Status(any)
+    if st and st.code ~= "NONE" then
+        return Word(st.code) .. DOT .. ns.Ago(st.at), SC(st.code)
+    end
+    local seen = ns.LastSeenInForever(info.id)
+    if seen then return "Seen in Forever " .. ns.Ago(seen), C.sec end
+    return "Not seen yet", C.muted
+end
+
 local function BuildBrowse(page)
     local title = PageTitle(page, "Browse rares")
     local count = W.Text(page, 12, "R", "", C.muted)
@@ -752,8 +558,6 @@ local function BuildBrowse(page)
         c:SetPoint("TOPLEFT", x, -62)
         x = x + c:GetWidth() + 6
     end
-    local addCustom = W.Button(page, { text = "Custom mob", icon = "plus", h = 26, size = 11 })
-    addCustom:SetPoint("TOPRIGHT", -20, -62)
 
     local list = W.List(page, MAX_H - 104 - 12, 44, function(lst)
         local r = CreateFrame("Frame", nil, lst)
@@ -773,21 +577,24 @@ local function BuildBrowse(page)
         r.btn:SetScript("OnClick", function()
             local info = r.info
             local tracked = ns.Lookup(info.id, info.name)
-            if tracked then
-                selectedKey = ns.Key(tracked.name)
-                ns.ShowPage(1)
-            else
-                local def = ns.TrackRare(info.id)
-                if def then selectedKey = ns.Key(def.name) end
-            end
+            if tracked then ns.RemoveMob(tracked) else ns.TrackRare(info.id) end
+            refreshers[2]()
         end)
+        r.btn:HookScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+            local tracked = r.info and ns.Lookup(r.info.id, r.info.name)
+            GameTooltip:SetText(tracked and "Stop tracking" or "Track", 1, 1, 1)
+            GameTooltip:AddLine("Rares in the zone you're in are always watched. Tracking keeps one watched in every zone.", 0.75, 0.77, 0.8, true)
+            GameTooltip:Show()
+        end)
+        r.btn:HookScript("OnLeave", function() GameTooltip:Hide() end)
         r:SetScript("OnEnter", function(self)
             self.bg:SetColor(C.chip, 1)
             local info = self.info
             if not info then return end
             GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
             GameTooltip:SetText(info.name, 1, 1, 1)
-            GameTooltip:AddLine((info.rank == 2 and "Rare elite" or "Rare") .. ", level " .. (info.minl or "?") .. "   NPC " .. info.id, 0.75, 0.77, 0.8)
+            GameTooltip:AddLine(RankLine(info) .. "   NPC " .. info.id, 0.75, 0.77, 0.8)
             if info.coords and info.coords[1] then
                 local pts = {}
                 for k = 1, #info.coords, 2 do pts[#pts + 1] = info.coords[k] .. ", " .. info.coords[k + 1] end
@@ -795,18 +602,19 @@ local function BuildBrowse(page)
             end
             local any = ns.LookupAny(info.id, info.name, false)
             if any then
-                for _, st in ipairs(ns.Layers(any)) do
-                    GameTooltip:AddDoubleLine("Layer " .. ns.LayerName(st.layer), st.text .. (st.src and (" (" .. st.src .. ")") or ""),
-                        0.9, 0.9, 0.9, 0.37, 0.84, 0.66)
+                for i, rep in ipairs(select(2, ns.Status(any))) do
+                    if i > 5 then break end
+                    local c = SC(rep.code)
+                    GameTooltip:AddDoubleLine(ns.ReportText(rep), ns.Ago(rep.at), c[1], c[2], c[3], 0.6, 0.62, 0.68)
                 end
             end
             local drops = ns.DropRows(info.id)
             if drops then
                 local shown = 0
-                for _, d in ipairs(drops) do
-                    if d.kind == "item" and shown < 5 then
+                for _, dr in ipairs(drops) do
+                    if dr.kind == "item" and shown < 5 then
                         if shown == 0 then GameTooltip:AddLine(" "); GameTooltip:AddLine("Drops", 0.6, 0.62, 0.68) end
-                        GameTooltip:AddDoubleLine("|cff" .. ns.QualityHex(d.q) .. d.name .. "|r", string.format("%g%%", d.pct), 1, 1, 1, 0.75, 0.77, 0.8)
+                        GameTooltip:AddDoubleLine("|cff" .. ns.QualityHex(dr.q) .. dr.name .. "|r", string.format("%g%%", dr.pct), 1, 1, 1, 0.75, 0.77, 0.8)
                         shown = shown + 1
                     end
                 end
@@ -826,22 +634,13 @@ local function BuildBrowse(page)
         if info.dropHit then
             r.sub:SetText(Hex(C.accent) .. "Drops " .. info.dropHit .. "|r" .. DOT .. (info.zone or "Unknown zone"))
         else
-            r.sub:SetText((info.zone or "Unknown zone") .. DOT .. "level " .. (info.minl or "?") .. DOT
-                .. (info.rank == 2 and "Rare elite" or "Rare") .. (fam and (DOT .. Hex(C.accent) .. "Tame: " .. fam .. "|r") or ""))
+            r.sub:SetText((info.zone or "Unknown zone") .. DOT .. RankLine(info)
+                .. (fam and (DOT .. Hex(C.accent) .. "Tame: " .. fam .. "|r") or ""))
         end
-        r.resp:SetText(info.rmin and (ns.Hours(info.rmin) .. " - " .. ns.Hours(info.rmax) .. " h") or "Unknown")
-        local any = ns.LookupAny(info.id, info.name, false)
-        local st = any and ns.Summary(any)
-        if st and st.code ~= "NONE" then
-            local col = (st.code == "UP" or st.code == "OPEN") and C.accent or (st.code == "WAIT" and C.yellow or C.sec)
-            local word = ({ UP = "Up", STALE = "Seen", WAIT = "Dead", OPEN = "Window open", DUE = "Due" })[st.code] or ""
-            r.seen:SetText(word .. " (" .. ns.LayerShort(st.layer) .. ")")
-            W.SetColor(r.seen, col)
-        else
-            local seen = ns.LastSeenInForever(info.id)
-            r.seen:SetText(seen and ("Seen " .. ns.Dur(ns.Now() - seen) .. " ago") or "Not seen yet")
-            W.SetColor(r.seen, seen and C.accent or C.muted)
-        end
+        r.resp:SetText(RespawnText(info) or "Unknown")
+        local text, col = BrowseState(info)
+        r.seen:SetText(text)
+        W.SetColor(r.seen, col)
         if tracked then
             r.btn:SetStyle("ghost"); r.btn:SetIcon("check"); r.btn:SetLabel("Tracking")
         else
@@ -859,61 +658,11 @@ local function BuildBrowse(page)
             r.name:SetWidth(nameW); r.sub:SetWidth(nameW + 24)
             r.resp:ClearAllPoints(); r.resp:SetPoint("LEFT", respX, 0)
             r.seen:ClearAllPoints(); r.seen:SetPoint("LEFT", seenX, 0)
-            r.seen:SetWidth(math.max(130, RW - seenX - 92 - 24))
+            r.seen:SetWidth(math.max(150, RW - seenX - 92 - 24))
         end)
         list:Fit(CH - 104 - 12)
     end
     layouts[2]()
-
-    -- custom mob popover
-    local cp = W.Popover("RareWatchCustomPopover", 340, 214)
-    W.Text(cp, 13, "M", "Track a custom mob"):SetPoint("TOPLEFT", 16, -16)
-    local fName = W.Field(cp, "Name", 200, "Exact in-game name")
-    fName:SetPoint("TOPLEFT", 16, -60)
-    local fId = W.Field(cp, "NPC ID", 92, "Optional")
-    fId:SetPoint("LEFT", fName, "RIGHT", 16, 0)
-    local fMin = W.Field(cp, "Min hours", 92, "6")
-    fMin:SetPoint("TOPLEFT", 16, -112)
-    local fMax = W.Field(cp, "Max hours", 92, "24")
-    fMax:SetPoint("LEFT", fMin, "RIGHT", 16, 0)
-    local fNote = W.Cell(cp, 11, "R", 308, C.muted)
-    fNote:SetPoint("TOPLEFT", 16, -150)
-    local useTarget = W.Button(cp, { text = "Use target", icon = "target", onClick = function()
-        if not UnitExists("target") or UnitIsPlayer("target") then
-            fNote:SetText(Hex(C.red) .. "Target an NPC first.|r")
-            return
-        end
-        local id = ns.ParseGUID(UnitGUID("target"))
-        fName:SetText(UnitName("target") or "")
-        fId:SetText(id and tostring(id) or "")
-        local mn, mx = ns.DefaultRespawn(id)
-        fMin:SetText(ns.Hours(mn))
-        fMax:SetText(ns.Hours(mx))
-        fNote:SetText("Filled from your target.")
-    end })
-    useTarget:SetPoint("BOTTOMLEFT", 16, 14)
-    local fSave = W.Button(cp, { text = "Track", style = "primary", w = 80, onClick = function()
-        local a, b = tonumber(fMin:GetText()), tonumber(fMax:GetText())
-        local def, res = ns.AddMob(fName:GetText(), fId:GetText(), a and a * 3600, b and b * 3600)
-        if def then
-            def.respawnSrc = "your setting"
-            selectedKey = ns.Key(def.name)
-            cp:Hide()
-        else
-            fNote:SetText(Hex(C.red) .. res .. "|r")
-        end
-    end })
-    fSave:SetPoint("BOTTOMRIGHT", -16, 14)
-    fMax.onEnter = function() fSave:Click() end
-    cp.onOpen = function()
-        for _, e in ipairs({ fName, fId }) do e:SetText("") end
-        fMin:SetText(ns.Hours(ns.opt.defaultMin))
-        fMax:SetText(ns.Hours(ns.opt.defaultMax))
-        fNote:SetText("For mobs that aren't in the list. Target it for the name and ID.")
-    end
-    addCustom:SetScript("OnClick", function(self)
-        if cp:IsShown() then cp:Hide() else cp:Open(self, "TOPRIGHT", "BOTTOMRIGHT", 0, -6) end
-    end)
 
     local lastQuery
     search.onChange = function() if refreshers[2] then refreshers[2]() end end
@@ -960,7 +709,7 @@ local function BuildHistory(page)
     end)
     clear:SetPoint("TOPRIGHT", -56, -16)
 
-    local search = W.Edit(page, 200, 30, "Search rare, player or layer")
+    local search = W.Edit(page, 200, 30, "Search rare or player")
     search:SetPoint("RIGHT", clear, "LEFT", -10, 0)
     local sIcon = W.Icon(search, "search", 14, C.muted)
     sIcon:SetPoint("RIGHT", -10, 0)
@@ -971,12 +720,10 @@ local function BuildHistory(page)
         r.dot:SetPoint("LEFT", 12, 0)
         r.event = W.Cell(r, 12, "M", 70)
         r.event:SetPoint("LEFT", 28, 0)
-        r.mob = W.Cell(r, 12, "R", 220)
+        r.mob = W.Cell(r, 12, "R", 240)
         r.mob:SetPoint("LEFT", 104, 0)
-        r.layer = W.Cell(r, 12, "R", 90, C.sec)
-        r.layer:SetPoint("LEFT", 330, 0)
-        r.src = W.Cell(r, 12, "R", 90, C.muted)
-        r.src:SetPoint("LEFT", 424, 0)
+        r.src = W.Cell(r, 12, "R", 140, C.muted)
+        r.src:SetPoint("LEFT", 350, 0)
         r.time = W.Cell(r, 11, "R", 150, C.muted, "RIGHT")
         r.time:SetPoint("RIGHT", -12, 0)
         r.join = JoinButton(r)
@@ -991,11 +738,11 @@ local function BuildHistory(page)
         r.event:SetText(e.label)
         W.SetColor(r.event, e.color)
         r.mob:SetText(h.n)
-        r.layer:SetText("Layer " .. ns.LayerShort(h.l))
-        r.src:SetText(h.s or "")
-        r.time:SetText(ns.Dur(ns.Now() - h.t) .. " ago" .. DOT .. ns.Day(h.t))
+        local who = ns.Reporter(h.l, h.s)
+        r.src:SetText("by " .. (who == "You" and "you" or who))
+        r.time:SetText(ns.Ago(h.t) .. DOT .. ns.Day(h.t))
         local joinable = false
-        if (h.k == "SEEN" or h.k == "SPAWN") and ns.Now() - h.t < 600 then
+        if h.k == "SEEN" and ns.Now() - h.t < ns.FRESH then
             local def = ns.LookupAny(nil, h.n, false)
             local rec = def and def.layers and def.layers[h.l]
             if rec then joinable = r.join:Bind(def, { layer = h.l, rec = rec }) else r.join:Hide() end
@@ -1005,21 +752,17 @@ local function BuildHistory(page)
         r.time:ClearAllPoints()
         r.time:SetPoint("RIGHT", joinable and -(r.join:GetWidth() + 22) or -12, 0)
         r.time:SetWidth(joinable and 120 or 150)
-        r.src:SetWidth(math.max(60, (r.srcW or 90) - (joinable and 60 or 0)))
     end)
     list:SetPoint("TOPLEFT", 8, -70)
     list:SetPoint("TOPRIGHT", -12, -70)
     layouts[3] = function()
         local extra = math.max(0, (CW - 20 - 8) - 684)
-        local mobW = 220 + math.floor(extra * 0.25)
-        local layerX = 104 + mobW + 6
-        local layerW = 90 + math.floor(extra * 0.4)
-        local srcX = layerX + layerW + 4
-        local srcW = 90 + math.floor(extra * 0.35)
+        local mobW = 240 + math.floor(extra * 0.4)
+        local srcX = 104 + mobW + 6
+        local srcW = 140 + math.floor(extra * 0.4)
         EachRow(list, function(r)
             r.mob:SetWidth(mobW)
-            r.layer:ClearAllPoints(); r.layer:SetPoint("LEFT", layerX, 0); r.layer:SetWidth(layerW)
-            r.src:ClearAllPoints(); r.src:SetPoint("LEFT", srcX, 0); r.src:SetWidth(srcW); r.srcW = srcW
+            r.src:ClearAllPoints(); r.src:SetPoint("LEFT", srcX, 0); r.src:SetWidth(srcW)
         end)
         list:Fit(CH - 70 - 12)
     end
@@ -1036,7 +779,7 @@ local function BuildHistory(page)
                 out[#out + 1] = h
             else
                 local e = EVENTS[h.k]
-                local hay = ((h.n or "") .. " " .. (h.s or "") .. " " .. ns.LayerName(h.l) .. " " .. (e and e.label or "")):lower()
+                local hay = ((h.n or "") .. " " .. ns.Reporter(h.l, h.s) .. " " .. (e and e.label or "")):lower()
                 if hay:find(q, 1, true) then out[#out + 1] = h end
             end
         end
@@ -1065,15 +808,15 @@ local function BuildSettings(page)
     -- depending on the window width, and stretches them to fill it.
     local sections, cur = {}, nil
 
-    local function Section(ci, text)
+    local function Section(text)
         local card = CreateFrame("Frame", nil, page)
         W.Round(card, C.card, 10)
         local t = W.Text(card, 11, "M", text:upper(), C.muted)
         t:SetPoint("TOPLEFT", PADX, -14)
-        cur = { card = card, rows = {}, col2 = ci }
+        cur = { card = card, rows = {} }
         sections[#sections + 1] = cur
     end
-    local function Row(ci, label, control, tip)
+    local function Row(label, control, tip)
         local card = cur.card
         local row = CreateFrame("Frame", nil, card)   -- placed by Layout
         if tip then row:EnableMouse(true) end
@@ -1101,13 +844,13 @@ local function BuildSettings(page)
         local ncol = avail >= 1040 and 3 or 2
         local GAP = 14
         local colW = Clamp(math.floor((avail - GAP * (ncol - 1)) / ncol), 300, 480)
-        -- which column each section goes in
-        local plan = ncol == 3 and { 1, 2, 3, 2 } or { 1, 1, 2, 2 }
+        -- which column each section goes in: Alerts, Display, Sharing, Advanced
+        local plan = ncol == 3 and { 1, 2, 3, 3 } or { 1, 1, 2, 2 }
         -- row height: as roomy as the window height allows
         local HEAD, FOOT, TOP = 36, 12, 60
         local rows, secs = { 0, 0, 0 }, { 0, 0, 0 }
         for i, sec in ipairs(sections) do
-            local c = plan[i] or sec.col2
+            local c = plan[i]
             rows[c] = rows[c] + #sec.rows
             secs[c] = secs[c] + 1
         end
@@ -1126,7 +869,7 @@ local function BuildSettings(page)
         rh = math.max(22, rh)
         local ys = { -TOP, -TOP, -TOP }
         for i, sec in ipairs(sections) do
-            local c = plan[i] or sec.col2
+            local c = plan[i]
             for k, row in ipairs(sec.rows) do
                 local y = -HEAD - (k - 1) * rh
                 row:ClearAllPoints()
@@ -1148,9 +891,9 @@ local function BuildSettings(page)
     layouts[4] = Layout
     local function Opt(key) return W.Switch(page, function() return o[key] end, function(v) o[key] = v; ns.Changed() end) end
 
-    -- column 1
-    Section(1, "Alerts")
-    Row(1, "Play a sound", Opt("alertSound"))
+    Section("Alerts")
+    local alertTip = "Alerts are for rares in the zone you're in and rares you track: once when one is spotted, by you or another RareWatch user. Mute a rare on its page to silence just that one."
+    Row("Play a sound", Opt("alertSound"), alertTip)
     local soundBtn
     soundBtn = W.Button(page, { text = "", icon = "volume", h = 24, size = 11, onClick = function()
         o.sound = (o.sound % #ns.SOUNDS) + 1
@@ -1158,83 +901,53 @@ local function BuildSettings(page)
         ns.PlayAlertSound()
     end, tip = { "Alert sound", "Click to cycle sounds. Plays a preview." } })
     soundBtn.Refresh = function(self) self:SetLabel((ns.SOUNDS[o.sound] or ns.SOUNDS[1]).name) end
-    Row(1, "Sound", soundBtn)
-    Row(1, "Big text on screen", Opt("alertRaidWarn"))
-    Row(1, "Flash the taskbar icon", Opt("alertFlash"))
-    Row(1, "Message in chat", Opt("alertChat"))
-    Row(1, "Sound for other users' sightings", Opt("shareAlerts"))
-    Row(1, "Notify when a window opens", Opt("windowAlert"))
-    Row(1, "Alert for untracked rares", Opt("alertAnyRare"), "Also alert once for rares you aren't tracking.")
-    Row(1, "Try it out", W.Button(page, { text = "Test alert", icon = "bell", h = 24, size = 11, onClick = function()
-        ns.Alert("TEST: Humar the Pridelord is UP")
+    Row("Sound", soundBtn)
+    Row("Big text on screen", Opt("alertRaidWarn"), "For rares in the zone you're in.")
+    Row("Flash the taskbar icon", Opt("alertFlash"), "For rares in the zone you're in.")
+    Row("Message in chat", Opt("alertChat"), "Sightings, and kills of rares you're watching.")
+    Row("Try it out", W.Button(page, { text = "Test alert", icon = "bell", h = 24, size = 11, onClick = function()
+        ns.Alert("TEST: a rare is up!")
     end }))
 
-    Section(1, "Display")
-    Row(1, "Status box", Opt("showTracker"), "The small box that shows fresh sightings of your tracked rares in your zone, with a Join button.")
-    Row(1, "Lock status box", Opt("lockTracker"))
-    Row(1, "Minimap button", W.Switch(page, function() return not o.minimapHide end,
+    Section("Display")
+    Row("Status box", Opt("showTracker"), "The small box that lists rares spotted in your zone in the last 10 minutes, with a Join button.")
+    Row("Hide the box when nothing is up", Opt("boxHideEmpty"), "The box shows itself again when a rare in your zone is spotted.")
+    Row("Lock status box", Opt("lockTracker"))
+    Row("Minimap button", W.Switch(page, function() return not o.minimapHide end,
         function(v) o.minimapHide = not v; ns.Changed() end))
     local pct = function(v) return math.floor(v * 100 + 0.5) .. "%" end
-    Row(1, "Status box size", W.Stepper(page, function() return o.trackerScale end,
+    Row("Status box size", W.Stepper(page, function() return o.trackerScale end,
         function(v) o.trackerScale = v; ns.Changed() end, 0.6, 1.6, 0.1, pct))
-    Row(1, "Window size", W.Stepper(page, function() return o.windowScale end,
+    Row("Window size", W.Stepper(page, function() return o.windowScale end,
         function(v) o.windowScale = v; main:SetScale(v) end, 0.7, 1.4, 0.1, pct))
 
-
-    -- column 2
-    Section(2, "Sharing")
-    Row(2, "Share with my guild", Opt("shareGuild"))
-    Row(2, "Share with RareWatch users", W.Switch(page, function() return GetChannelName(ns.CHANNEL) > 0 end,
+    Section("Sharing")
+    Row("Share with my guild", Opt("shareGuild"))
+    Row("Share with RareWatch users", W.Switch(page, function() return GetChannelName(ns.CHANNEL) > 0 end,
         function(v) ns.SetChannel(v) end),
         "Kills, tames and sightings are shared automatically with everyone running RareWatch, through a hidden chat channel. Members can see your character name in the channel list.")
-    Row(2, "Share with my group", Opt("shareGroup"), "Also share with your party or raid.")
-    local onlineRow = Row(2, "Users online", W.Button(page, { text = "Resync", icon = "refresh", h = 24, size = 11,
-        onClick = function() ns.SyncNow() end }),
-        ns.Private() and "Syncing is automatic. Resync just does it right now. On this game build layers can't be matched between players, so a report shows the layer as that player sees it, like \"C (Bob's)\"."
-            or "Syncing is automatic. Resync just does it right now.")
-
-    ns.settingsOnlineRow = onlineRow
-    local hostRow = Row(2, "Let others join my layer", W.Switch(page, function() return o.hostJoin and not (ns.Join and ns.Join.PausedFor() > 0) end,
+    Row("Share with my group", Opt("shareGroup"), "Also share with your party or raid.")
+    local onlineRow = Row("Users online", W.Button(page, { text = "Resync", icon = "refresh", h = 24, size = 11,
+        onClick = function() ns.SyncNow() end }), "Syncing is automatic. Resync just does it right now.")
+    local hostRow = Row("Let others join my layer", W.Switch(page, function() return o.hostJoin and not (ns.Join and ns.Join.PausedFor() > 0) end,
         function(v) o.hostJoin = v; if v and ns.Join then ns.Join.Resume() end; ns.Changed() end),
         "When you see a rare, other RareWatch users can ask to join your layer for it. You always click Accept or Decline first, and nobody whose layer moves are nearly used up can ask (that could move you off the rare). At most 3 requests every 5 minutes; anyone you decline waits 10 minutes. Turning this back on ends a pause.")
-    local movesRow = Row(2, "Layer moves this hour", nil,
+    local movesRow = Row("Layer moves this hour", nil,
         "The game allows about 10 layer moves an hour. Every move counts, from RareWatch, Layer-Swap or joining any group. Join requests stop at 8, so a host is never moved to you instead.")
-    local layerRow = Row(2, "", nil)
-    local named = CreateFrame("Frame", nil, page)
-    named:SetSize(150, 24)
-    local labelIn = W.Edit(named, 70, 24, "A")
-    labelIn:SetPoint("LEFT")
-    labelIn:SetMaxLetters(12)
-    local layerErr
-    local function SaveLabel()
-        local ok, err = ns.SetLayerName(ns.currentLayer, labelIn:GetText())
-        if ok then labelIn:SetText(""); layerErr = nil else layerErr = err end
-        refreshers[4]()
-    end
-    local labelBtn = W.Button(named, { text = "Name it", h = 24, size = 11, onClick = SaveLabel })
-    labelBtn:SetPoint("RIGHT")
-    labelIn.onEnter = SaveLabel
-    Row(2, "Name your current layer", named,
-        "The game only gives a number per layer. If another addon calls it e.g. layer A, type A so RareWatch uses the same name. Empty clears it.")
 
-    Section(2, "Advanced")
-    Row(2, "Read spawn time from mob ID", Opt("decodeSpawn"),
-        "Experimental. Some clients encode the spawn time in the mob's ID. Turn off if spawn times look wrong.")
-    local hfmt = function(v) return ns.Hours(v) .. " h" end
-    Row(2, "Unknown mobs: min respawn", W.Stepper(page, function() return o.defaultMin end,
-        function(v) o.defaultMin = v end, 3600, 72 * 3600, 3600, hfmt))
-    Row(2, "Unknown mobs: max respawn", W.Stepper(page, function() return o.defaultMax end,
-        function(v) o.defaultMax = v end, 3600, 72 * 3600, 3600, hfmt))
-    Row(2, "Clear timers, history, measurements", W.ConfirmButton(page, { text = "Reset", icon = "trash", h = 24, size = 11, style = "ghost" },
+    Section("Advanced")
+    Row("Clear kills, sightings and history", W.ConfirmButton(page, { text = "Clear", icon = "trash", h = 24, size = 11, style = "ghost" },
         function()
-            for _, def in pairs(ns.db.mobs) do wipe(def.layers); def.samples = nil end
+            for _, def in pairs(ns.db.mobs) do wipe(def.layers) end
+            wipe(ns.db.shadow)
             wipe(ns.db.history)
+            ns.BumpDigest()
             ns.Changed()
-        end))
-    Row(2, "Reset window size", W.Button(page, { text = "Reset", icon = "refresh", h = 24, size = 11,
+        end), "Other RareWatch users' recent kills and sightings come back with the next sync.")
+    Row("Reset window size", W.Button(page, { text = "Reset", icon = "refresh", h = 24, size = 11,
         onClick = function() ns.ResetMainSize() end }),
         "Drag the bottom-right corner of the window to resize it. Reset puts it back to the default size.")
-    Row(2, "Use the game's font (after /reload)", W.Switch(page, function() return o.plainFont end, function(v)
+    Row("Use the game's font (after /reload)", W.Switch(page, function() return o.plainFont end, function(v)
         o.plainFont = v
         ns.Print("Font change applies after /reload.")
     end))
@@ -1247,17 +960,11 @@ local function BuildSettings(page)
         if ns.Join then
             local paused = ns.Join.PausedFor()
             hostRow.label:SetText("Let others join my layer" .. (paused > 0 and (Hex(C.muted) .. "  paused " .. ns.Dur(paused) .. "|r") or ""))
-            local used = ns.Join.Used()
-            local col = used >= 8 and C.red or (used >= 7 and C.yellow or C.accent)
-            movesRow.label:SetText("Layer moves this hour: " .. Hex(col) .. used .. "|r of about " .. ns.Join.Limit())
+            local used, limit, safe, warn = ns.Join.Used(), ns.Join.Limit(), ns.Join.SafeUsed(), ns.Join.WarnUsed()
+            local col = used >= safe and C.red or (used >= warn and C.yellow or C.accent)
+            movesRow.label:SetText("Layer moves this hour: " .. Hex(col) .. used .. "|r of about " .. limit)
         end
         onlineRow.label:SetText("Users online: " .. Hex(n > 0 and C.accent or C.muted) .. (n + 1) .. "|r (incl. you)")
-        if layerErr then
-            layerRow.label:SetText(Hex(C.red) .. layerErr .. "|r")
-        else
-            layerRow.label:SetText("Your layer: " .. (ns.currentLayer and (Hex(C.accent) .. ns.LayerName(ns.currentLayer) .. "|r") or "unknown - target any NPC")
-                .. (ns.currentLayerZone and (Hex(C.muted) .. DOT .. ns.currentLayerZone .. "|r") or ""))
-        end
     end
 end
 
@@ -1265,7 +972,7 @@ end
 -- Main window
 ---------------------------------------------------------------------------
 local PAGE_DEFS = {
-    { icon = "clock", name = "Tracker", build = BuildTracker },
+    { icon = "target", name = "Rares", build = BuildRares },
     { icon = "search", name = "Browse rares", build = BuildBrowse },
     { icon = "history", name = "History", build = BuildHistory },
     { icon = "settings", name = "Settings", build = BuildSettings },
@@ -1282,7 +989,6 @@ function ns.ShowPage(i)
     end
     ns.RefreshMain()
 end
-ns.ShowTab = ns.ShowPage
 
 function ns.RefreshMain()
     if not main or not main:IsShown() then return end
@@ -1461,34 +1167,33 @@ function ns.ResetMainSize()
 end
 
 ---------------------------------------------------------------------------
--- Status box: fresh sightings of your tracked rares in this zone, each with a Join button.
--- (Respawn windows stopped meaning much once Forever removed layering, so the box shows sightings instead.)
+-- Status box: rares in this zone that are up right now (or were just killed), with Join.
 ---------------------------------------------------------------------------
-local MAX_ROWS, BOX_W, ROW_H = 4, 270, 40
+local MAX_ROWS, BOX_W, ROW_H = 4, 290, 40
 
--- Tracked rares that live in the zone you're in, and the sightings of them you could join.
-local function Sightings()
-    local here = GetRealZoneText and GetRealZoneText() or ""
-    local watched, out = 0, {}
-    for _, def in ipairs(ns.list) do
-        local info = ns.RareInfo(def.id)
-        if info and info.zone and info.zone == here then
-            watched = watched + 1
-            for _, st in ipairs(ns.Layers(def)) do
-                local host, _, why
-                if ns.Join then host, _, why = ns.Join.CanJoin(def, st) end
-                if host and why ~= "hide" then
-                    local r = st.rec or {}
-                    out[#out + 1] = { def = def, st = st, host = host, at = math.max(r.seen or 0, r.spawn or 0) }
+-- Rows for the box: every current sighting of a rare in this zone (one per layer someone sees it on, yours
+-- included), and kills in the last couple of minutes, so you know a sighting is over.
+local function BoxRows()
+    local zone = ns.Zone()
+    local out, n = {}, 0
+    local t = ns.Now()
+    for _, info in ipairs(ns.ZoneRares(zone)) do
+        n = n + 1
+        local def = ns.LookupAny(info.id, info.name, false)
+        if def then
+            for _, rep in ipairs(select(2, ns.Status(def))) do
+                if rep.code == "UP" or (rep.code == "KILLED" and t - rep.at <= KILL_ROW_FOR) then
+                    out[#out + 1] = { def = def, rep = rep }
                 end
             end
         end
     end
     table.sort(out, function(a, b)
-        if a.at ~= b.at then return a.at > b.at end
+        if (a.rep.code == "UP") ~= (b.rep.code == "UP") then return a.rep.code == "UP" end
+        if a.rep.at ~= b.rep.at then return a.rep.at > b.rep.at end
         return a.def.name < b.def.name
     end)
-    return out, watched, here
+    return out, n, zone
 end
 
 local function BuildOverlay()
@@ -1508,7 +1213,7 @@ local function BuildOverlay()
         ns.EnsureChannel()
         if button == "RightButton" then ns.ToggleMain(4) else ns.ToggleMain(1) end
     end)
-    W.Tip(overlay, "RareWatch", "Shows your tracked rares that another RareWatch user spotted in this zone in the last 10 minutes. Join puts you on their layer.\n\nLeft-click: open tracker\nRight-click: settings\nDrag: move")
+    W.Tip(overlay, "RareWatch", "Rares in this zone that you or another RareWatch user saw in the last 10 minutes. Join puts you on that player's layer.\n\nLeft-click: open RareWatch\nRight-click: settings\nDrag: move")
 
     if W.iconsOK then W.Icon(overlay, "paw", 12, C.accent):SetPoint("TOPLEFT", 10, -9) end
     local head = W.Text(overlay, 11, "M", "RareWatch", C.sec)
@@ -1521,16 +1226,15 @@ local function BuildOverlay()
         local row = {}
         row.dot = W.Dot(overlay, 6)
         row.dot:SetPoint("TOPLEFT", 11, y - 6)
-        row.dot:SetVertexColor(C.accent[1], C.accent[2], C.accent[3], 1)
-        row.name = W.Cell(overlay, 12, "M", BOX_W - 110, C.text)
+        row.name = W.Cell(overlay, 12, "M", BOX_W - 100, C.text)
         row.name:SetPoint("TOPLEFT", 24, y - 1)
-        row.sub = W.Cell(overlay, 11, "R", BOX_W - 110, C.muted)
+        row.sub = W.Cell(overlay, 11, "R", BOX_W - 100, C.muted)
         row.sub:SetPoint("TOPLEFT", 24, y - 17)
         row.join = JoinButton(overlay)
         row.join:SetPoint("TOPRIGHT", -10, y - 4)
         overlay.rows[i] = row
     end
-    -- shown when there is nothing to join
+    -- shown when nothing is up
     overlay.empty = W.Cell(overlay, 12, "R", BOX_W - 34, C.muted)
     overlay.empty:SetPoint("TOPLEFT", 24, -29)
     overlay.emptyDot = W.Dot(overlay, 6)
@@ -1540,27 +1244,32 @@ end
 
 local function RefreshOverlay()
     if not overlay then return end
-    overlay:SetShown(ns.opt.showTracker)
-    if not ns.opt.showTracker then return end
+    if not ns.opt.showTracker then overlay:Hide(); return end
     overlay:SetScale(ns.opt.trackerScale)
-    local list, watched, here = Sightings()
-    overlay.zone:SetText(here or "")
+    local list, watched, zone = BoxRows()
+    if #list == 0 and ns.opt.boxHideEmpty then overlay:Hide(); return end
+    overlay:Show()
+    overlay.zone:SetText(zone or "")
     local shown = 0
     for i, row in ipairs(overlay.rows) do
         local s = list[i]
         if s then
             shown = i
+            local rep = s.rep
+            local c = SC(rep.code)
+            row.dot:SetVertexColor(c[1], c[2], c[3], 1)
             row.name:SetText(s.def.name)
-            row.sub:SetText(s.host .. DOT .. (ns.Now() - s.at < 60 and "just now" or (ns.Dur(ns.Now() - s.at) .. " ago")))
+            W.SetColor(row.name, rep.code == "UP" and C.text or C.sec)
+            row.sub:SetText(ns.ReportText(rep) .. DOT .. ns.Ago(rep.at))
             row.dot:Show(); row.name:Show(); row.sub:Show()
-            if not row.join:Bind(s.def, s.st) then row.join:Hide() end
+            if rep.code ~= "UP" or not row.join:Bind(s.def, rep) then row.join:Hide() end
         else
             row.dot:Hide(); row.name:Hide(); row.sub:Hide(); row.join:Hide()
         end
     end
     if shown == 0 then
-        overlay.empty:SetText(watched == 0 and "None of your tracked rares live here"
-            or ("Watching " .. watched .. " here, nothing spotted yet"))
+        overlay.empty:SetText(watched == 0 and "No known rares in this zone"
+            or ("Watching " .. watched .. (watched == 1 and " rare" or " rares") .. ", none up"))
         overlay.empty:Show(); overlay.emptyDot:Show()
         overlay:SetHeight(54)
     else
@@ -1627,10 +1336,18 @@ local function BuildMinimap()
     b:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:SetText("RareWatch", 1, 1, 1)
-        for _, item in ipairs(SortedMobs()) do
-            local c = SC(item.st.code)
-            GameTooltip:AddDoubleLine(item.def.name, ShortStatus(item.st), 0.9, 0.9, 0.9, c[1], c[2], c[3])
+        local here, elsewhere, zone = Groups()
+        local function add(items, title)
+            if #items == 0 then return end
+            GameTooltip:AddLine(title, 0.55, 0.57, 0.63)
+            for i, item in ipairs(items) do
+                if i > 12 then GameTooltip:AddLine("  +" .. (#items - 12) .. " more", 0.55, 0.57, 0.63); break end
+                local c = SC(item.st.code)
+                GameTooltip:AddDoubleLine(item.def.name, Word(item.st.code), 0.9, 0.9, 0.9, c[1], c[2], c[3])
+            end
         end
+        add(here, zone or "This zone")
+        add(elsewhere, "Tracked elsewhere")
         GameTooltip:AddLine(" ")
         GameTooltip:AddLine("Left-click: open   Right-click: status box   Drag: move", 0.55, 0.57, 0.63, true)
         GameTooltip:Show()
@@ -1650,9 +1367,12 @@ function ns.BuildUI()
         ns.RefreshMain()
     end
     ns.OnChange(All)
+    -- times ("2m ago") tick on: the box and the Rares and Settings pages every second, the long lists every 10
+    local n = 0
     C_Timer.NewTicker(1, function()
+        n = n + 1
         RefreshOverlay()
-        ns.RefreshMain()
+        if activePage == 1 or activePage == 4 or n % 10 == 0 then ns.RefreshMain() end
     end)
     All()
 end
@@ -1666,15 +1386,15 @@ function ns.ShowConnectPrompt()
     ns.connectPrompt = p
     local icon = W.Icon(p, "users", 20, C.accent)
     icon:SetPoint("TOPLEFT", 18, -18)
-    local title = W.Text(p, 14, "S", "Share rare timers automatically?")
+    local title = W.Text(p, 14, "S", "Share rare sightings automatically?")
     title:SetPoint("LEFT", icon, "RIGHT", 8, 0)
-    local body = W.Text(p, 12, "R", "RareWatch users share kills, tames and sightings with each other in the background, so you see every rare's timer on every layer without asking anyone.\n\nThis joins a hidden chat channel. Other members can see your character name in it.")
+    local body = W.Text(p, 12, "R", "RareWatch users share kills, tames and sightings with each other in the background, so you hear when a rare in your zone is up on someone else's layer and can join them.\n\nThis joins a hidden chat channel. Other members can see your character name in it.")
     body:SetPoint("TOPLEFT", 18, -48)
     body:SetWidth(344)
     body:SetJustifyH("LEFT")
     W.SetColor(body, C.sec)
     local yes = W.Button(p, { text = "Connect", icon = "check", style = "primary", w = 110, h = 28,
-        onClick = function() p:Hide(); ns.SetChannel(true); ns.Print("Connected. Timers now sync automatically.") end })
+        onClick = function() p:Hide(); ns.SetChannel(true); ns.Print("Connected. Sightings now sync automatically.") end })
     yes:SetPoint("BOTTOMRIGHT", -16, 14)
     local later = W.Button(p, { text = "Not now", style = "ghost", h = 28, onClick = function() p:Hide() end })
     later:SetPoint("RIGHT", yes, "LEFT", -8, 0)

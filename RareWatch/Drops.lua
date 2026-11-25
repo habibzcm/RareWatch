@@ -81,25 +81,6 @@ function ns.PoolText(p)
     return "Random " .. (QUALITY_WORD[p.q] or "") .. " item"
 end
 
--- Does any drop of this rare match a search string?
-local searchCache = {}
-function ns.DropMatches(id, q)
-    local e = ns.DROPS and ns.DROPS[id]
-    if not e or q == "" then return false end
-    local s = searchCache[id]
-    if not s then
-        local parts = {}
-        local items = e[4] or {}
-        for i = 1, #items, 3 do
-            local d = ns.DROP_ITEMS[items[i]]
-            if d then parts[#parts + 1] = d[1]:lower() end
-        end
-        s = table.concat(parts, "\n")
-        searchCache[id] = s
-    end
-    return s:find(q, 1, true) ~= nil
-end
-
 function ns.TameFamily(id)
     local e = ns.DROPS and ns.DROPS[id]
     if e and e[3] and e[3] > 0 then return ns.FAMILIES[e[3]] or "Beast" end

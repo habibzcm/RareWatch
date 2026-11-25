@@ -1,21 +1,21 @@
 # RareWatch
 
-A rare spawn tracker for **WoW Forever**. It tracks kills, tames and sightings of rare and rare-elite mobs, works out each rare's respawn window per layer, and shares what it learns with everyone else running RareWatch. No chat commands needed to report anything.
+A rare tracker for **WoW Forever**. It answers one question: is a rare in my zone up right now, on any layer another RareWatch user is on? If it is, one click asks that player to bring you onto their layer.
 
 Download it from [CurseForge](https://www.curseforge.com/wow/addons/rarewatch), or grab this repo and copy the `RareWatch` folder into `World of Warcraft\_forever_\Interface\AddOns\`.
 
 ## What it does
 
-- Spots rares around you and logs kills, tames and sightings
-- Respawn timers per layer, with alerts when a rare is likely up
-- 327 built-in rares with respawn estimates
-- Shares sightings and kills with other RareWatch users automatically
-- History tab, tracking list, and layer names you can set yourself
-- **Join a sighting (beta):** when another RareWatch user sees a rare, ask to join their layer with one click
+- Every rare in the zone you're in is watched automatically. **Track** any other rare to hear about it from every zone.
+- When you or another RareWatch user spots a watched rare, you get one alert, and it shows in the status box with a **Join** button
+- Kills and tames show too ("Killed by Bob, 40m ago"), so you know when a sighting is over
+- 327 built-in rares, plus rares discovered in Forever by RareWatch users, with drops, coordinates and waypoints
+- Shares kills, tames and sightings with other RareWatch users automatically. No chat commands needed to report anything.
+- Mute a rare to keep it listed without alerts
 
-## Joining someone's layer (beta)
+## Joining someone's layer
 
-The game moves you to another layer when you join the group of a player who is on it. When another RareWatch user reports a rare alive in the last 10 minutes, a **Join** button appears next to the sighting (Tracking and History tabs):
+The game moves you to another layer when you join the group of a player who is on it. When another RareWatch user reports a rare alive in the last 10 minutes, a **Join** button appears next to the sighting (status box, Rares page and History):
 
 1. Click **Join**. The player who saw the rare (the host) gets a prompt and clicks **Accept** or **Decline**. They have 2 minutes, so they can finish a fight first.
 2. When they accept, RareWatch accepts the invite, waits for the game to move you, then leaves the group again.

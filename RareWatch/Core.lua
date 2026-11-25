@@ -1,16 +1,22 @@
--- RareWatch - Core: data, detection, sharing, slash commands.
+-- RareWatch - Core: data, detection, sharing, alerts, slash commands.
+--
+-- What RareWatch answers: is a rare up in my zone, on any layer another RareWatch user is on, and can I get
+-- there? Layers can't be read from the player any more (game build 71037 gives every creature numbers of its
+-- own), so a layer is something a creature is on. RareWatch keeps the layer behind the scenes, so Join can put
+-- you on the layer of the player who sees the rare. Nothing in the window shows layers.
 local ADDON_NAME, ns = ...
-ns.VERSION = "0.7.2"
+ns.VERSION = "0.8.0"
 
 local PREFIX  = "RareWatch"
 local CHANNEL = "RareWatchSync"
-local PROTO   = "3"
+local PROTO   = "3"            -- unchanged since 0.6.5, so 0.7.x users and 0.8 users still hear each other
 ns.CHANNEL = CHANNEL
 ns.ICON = "Interface\\Icons\\Ability_Hunter_BeastTaming"
 
-ns.DEFAULT_MOBS = {
-    { name = "Humar the Pridelord", id = 5828, min = 8 * 3600, max = 12 * 3600 },
-}
+ns.FRESH    = 600              -- a sighting this recent means "up now" (and can be joined)
+local SEEN_FOR = 6 * 3600      -- older sightings are listed this long, as "Seen"
+local KILL_FOR = 24 * 3600     -- kills are listed this long, as "Killed"
+local KEEP     = 3 * 86400     -- records are kept this long after their last event
 
 ns.SOUNDS = {
     { name = "Raid Warning", id = 8959 },
@@ -21,33 +27,21 @@ ns.SOUNDS = {
 
 local DEFAULT_OPT = {
     alertSound = true, sound = 1, alertRaidWarn = true, alertFlash = true, alertChat = true,
-    shareAlerts = true, windowAlert = true, shareGuild = true, decodeSpawn = true,
-    showTracker = true, lockTracker = false, trackerScale = 1.0, windowScale = 1.0,
-    minimapHide = false, minimapAngle = 200,
-    alertAnyRare = true, defaultMin = 6 * 3600, defaultMax = 24 * 3600, plainFont = false,
-    shareGroup = true, hostJoin = true,
+    shareGuild = true, shareGroup = true, hostJoin = true,
+    showTracker = true, boxHideEmpty = false, lockTracker = false, trackerScale = 1.0, windowScale = 1.0,
+    minimapHide = false, minimapAngle = 200, plainFont = false,
 }
+-- settings that no longer exist (respawn windows, layer names, spawn decoding, untracked-rare alerts)
+local OLD_OPT = { "shareAlerts", "windowAlert", "decodeSpawn", "alertAnyRare", "defaultMin", "defaultMax" }
 
-ns.COLORS = {
-    UP    = { 0.35, 1.00, 0.45 },
-    OPEN  = { 1.00, 0.82, 0.10 },
-    DUE   = { 1.00, 0.55, 0.20 },
-    STALE = { 0.75, 0.85, 0.45 },
-    WAIT  = { 0.78, 0.80, 0.86 },
-    NONE  = { 0.50, 0.52, 0.58 },
+-- One word per state, used everywhere (window, status box, Browse, minimap).
+ns.STATUS = {
+    UP     = "Up",
+    SEEN   = "Seen",
+    KILLED = "Killed",
+    NONE   = "No reports",
 }
-ns.LABELS = {
-    UP = "UP", OPEN = "WINDOW OPEN", DUE = "SHOULD BE UP", STALE = "SEEN EARLIER",
-    WAIT = "RESPAWNING", NONE = "NO DATA",
-}
-local PRIO = { UP = 1, OPEN = 2, DUE = 3, STALE = 4, WAIT = 5, NONE = 9 }
-
-ns.EVENT_INFO = {
-    DOWN  = { label = "Killed",  color = { 1.00, 0.45, 0.40 } },
-    TAME  = { label = "Tamed",   color = { 0.55, 0.78, 1.00 } },
-    SEEN  = { label = "Sighted", color = { 0.35, 1.00, 0.45 } },
-    SPAWN = { label = "Spawned", color = { 0.30, 0.90, 0.75 } },
-}
+local PRIO = { UP = 1, SEEN = 2, KILLED = 3, NONE = 9 }
 
 ---------------------------------------------------------------------------
 -- Helpers
@@ -69,123 +63,94 @@ function ns.Dur(s)
     return string.format("%ds", s)
 end
 
-function ns.Clock(t) return date("%H:%M", t) end
+-- "just now", "4m ago", "2h ago", "3d ago": short enough for a list row.
+function ns.Ago(t)
+    local age = math.max(0, ns.Now() - (t or 0))
+    if age < 60 then return "just now" end
+    if age < 3600 then return math.floor(age / 60) .. "m ago" end
+    if age < 86400 then return math.floor(age / 3600) .. "h ago" end
+    return math.floor(age / 86400) .. "d ago"
+end
+
 function ns.Day(t) return date("%a %H:%M", t) end
 function ns.Hours(sec) return string.format("%g", math.floor(sec / 360 + 0.5) / 10) end
 
 local function Key(name) return strtrim(name or ""):lower() end
-local AddSample -- defined in the rare-database section below
 ns.Key = Key
 
--- From game build 71037 (20 Nov 2026) every creature carries numbers of its own in its GUID: two creatures
--- standing side by side differ in both the server and the zone part, so no creature number names a layer.
--- In that mode the layer is read once, held, and only read again when the game moves the player.
-ns.PRIVATE_BUILD = 71037
-local privateMode
-function ns.Private()
-    if privateMode == nil then
-        privateMode = false
-        if type(GetBuildInfo) == "function" then
-            local ok, _, build = pcall(GetBuildInfo)
-            privateMode = (ok and (tonumber(build) or 0) >= ns.PRIVATE_BUILD) and true or false
-        end
+-- Player names. Forever names have two parts ("Bluubs Tanockers"); UnitName gives only the first, while
+-- messages, whispers and invites need the full name. Names are compared on their first part.
+local function Clean(name) return (tostring(name or ""):gsub("[^%w_%-]", "")) end
+local function Short(name) return Ambiguate(tostring(name or ""), "short") end
+local function First(name) return Short(name):match("^[^%s]+") or "" end
+function ns.SameName(a, b)
+    if not a or not b then return false end
+    a, b = Short(a), Short(b)
+    return a == b or First(a) == First(b)
+end
+-- Does a full name belong to the owner part of a layer key? (the first name, or in older versions the whole
+-- name squeezed to 12 characters)
+function ns.OwnerIs(name, owner)
+    if not name or not owner or owner == "" then return false end
+    return Clean(First(name)) == owner or Clean(Short(name)):sub(1, 12) == owner
+end
+ns.Clean, ns.Short = Clean, Short
+
+-- The full name of the player a layer key's owner part stands for: one of `names` (sources of a record) if it
+-- matches, otherwise the most recently heard RareWatch user who matches. nil if nobody does.
+function ns.FullName(owner, ...)
+    for i = 1, select("#", ...) do
+        local name = select(i, ...)
+        if ns.OwnerIs(name, owner) then return Short(name) end
     end
-    return privateMode
+    local best, bestT
+    for name, p in pairs(ns.peers or {}) do
+        if ns.OwnerIs(name, owner) and (not bestT or (p.t or 0) > bestT) then best, bestT = name, p.t or 0 end
+    end
+    return best and Short(best)
 end
-ns.SharingPaused = ns.Private
 
+-- RareWatch is for the open world: inside dungeons, raids and battlegrounds the elites are not world rares, and
+-- the client restricts what addons may read there.
+function ns.InInstance()
+    local inside, kind = IsInInstance()
+    return inside and kind ~= nil and kind ~= "none"
+end
+
+---------------------------------------------------------------------------
+-- Layers (behind the scenes)
+--   Our own layer is read once from a creature and held, and only read again when the game moves us
+--   (SHARD_TRANSFER), at a zone border or a login. It gets a letter for this login: A, B, C...
+--   What travels between players is the layer as its owner sees it: "<player>.<letter>".
+---------------------------------------------------------------------------
 -- Creature-0-serverID-instanceID-zoneUID-npcID-spawnUID
--- Returns the npc id, the layer the creature counts for, and the spawn part. On builds where creature numbers
--- are private the layer is the one the player is holding, not the creature's own number.
 function ns.ParseGUID(guid)
-    if not guid then return end
-    local unitType, _, _, _, zoneUID, npcID, spawnUID = strsplit("-", guid)
+    if type(guid) ~= "string" then return end
+    local unitType, _, _, _, _, npcID, spawnUID = strsplit("-", guid)
     if unitType ~= "Creature" and unitType ~= "Vehicle" then return end
-    if ns.Private() then return tonumber(npcID), ns.currentLayer, spawnUID end
-    return tonumber(npcID), zoneUID, spawnUID
+    return tonumber(npcID), spawnUID
 end
 
--- The numbers a creature carries, as the id a reading is held under.
+-- The numbers a creature carries, as the id our own layer is held under.
 function ns.RawLayer(guid)
-    if not guid then return end
+    if type(guid) ~= "string" then return end
     local unitType, _, server, _, zoneUID = strsplit("-", guid)
     if (unitType ~= "Creature" and unitType ~= "Vehicle") or not server or not zoneUID then return end
     return server .. "-" .. zoneUID
 end
 
--- Low 23 bits of the spawn UID = spawn time (server epoch mod 2^23). Experimental.
-local function DecodeSpawnTime(spawnUID)
-    if not spawnUID or #spawnUID < 6 or not bit then return end
-    local n = tonumber(strsub(spawnUID, 5), 16)
-    if not n then return end
-    local t = ns.Now()
-    local spawn = (t - (t % 2 ^ 23)) + bit.band(n, 0x7fffff)
-    if spawn > t then spawn = spawn - 2 ^ 23 end
-    local age = t - spawn
-    if age < 0 or age > 24 * 3600 then return end
-    return spawn
+-- "<player>.<letter>": the owner and letter of a shared layer key.
+function ns.KeyOwner(key)
+    if type(key) ~= "string" then return end
+    return key:match("^([%w_%-]+)%.([%w_%-]+)$")
 end
 
----------------------------------------------------------------------------
--- Layers: the game gives a numeric ID; users can attach their own label.
----------------------------------------------------------------------------
-local function LetterOf(id)
-    return ns.db and ns.db.letters and ns.db.letters[id]
-end
-
--- "<player>.<letter>": another player's layer as they see it (letters are per player, so this is not your layer)
-local function Theirs(id)
-    if ns.Private() and type(id) == "string" then
-        local who, l = id:match("^([%w_%-]+)%.([%w_%-]+)$")
-        if who then return who, l end
-    end
-end
-
-function ns.LayerName(id, long)
-    if not id or id == "?" then return "unknown layer" end
-    local who, l = Theirs(id)
-    if who then return (long and "layer " or "") .. l .. " (" .. who .. "'s)" end
-    local label = ns.db and ns.db.layerNames[id]
-    if label then return (long and "layer " or "") .. label .. " (" .. id .. ")" end
-    local letter = LetterOf(id)
-    if letter then return (long and "layer " or "") .. letter .. " (" .. id .. ")" end
-    return (long and "layer " or "") .. tostring(id)
-end
-
+-- Our letter for a layer id (or the id itself before it has one).
 function ns.LayerShort(id)
-    if not id or id == "?" then return "unknown" end
-    local who, l = Theirs(id)
-    if who then return l .. " (" .. who .. "'s)" end
-    return (ns.db and ns.db.layerNames[id]) or LetterOf(id) or tostring(id)
-end
-
--- Turn user input (an ID or a label they assigned) into a layer ID.
-function ns.ResolveLayer(input)
-    input = input and strtrim(input) or ""
-    if input == "" then return nil end
-    for id, label in pairs(ns.db.layerNames) do
-        if label:lower() == input:lower() then return id end
-    end
-    for id, letter in pairs(ns.db.letters or {}) do
-        if tostring(letter):lower() == input:lower() then return id end
-    end
-    return input
-end
-
-function ns.SetLayerName(id, label)
-    if not id or id == "?" then return false, "Your layer isn't known yet - target any NPC first." end
-    label = label and strtrim(label) or ""
-    if label:find(":") then return false, "Label can't contain ':'." end
-    if label == "" then
-        ns.db.layerNames[id] = nil
-    else
-        for otherId, l in pairs(ns.db.layerNames) do
-            if otherId ~= id and l:lower() == label:lower() then ns.db.layerNames[otherId] = nil end
-        end
-        ns.db.layerNames[id] = label
-    end
-    ns.Changed()
-    return true
+    if not id or id == "?" then return "?" end
+    local owner, letter = ns.KeyOwner(id)
+    if owner then return letter end
+    return (ns.db and ns.db.letters and ns.db.letters[id]) or tostring(id)
 end
 
 ---------------------------------------------------------------------------
@@ -207,32 +172,24 @@ function ns.ChangedSoon()
 end
 
 ---------------------------------------------------------------------------
--- Retention: how long a layer's record is kept and shown depends on the rare's own respawn time.
--- (A flat limit threw away long-respawn rares before their window even opened.)
+-- Records: per rare, one record per layer key, holding the last kill and the last sighting.
 ---------------------------------------------------------------------------
 local MAX_LAYERS = 40        -- layer records kept per rare
 local HISTORY_MAX = 500      -- events kept in History
 local MAX_DISCOVERED = 400   -- rares discovered in game, kept in the list
 
-function ns.KeepFor(def)     -- stored this long after the last event
-    return math.min(14 * 86400, math.max(7 * 86400, 3 * (def and def.max or 0)))
-end
-function ns.ShowFor(def)     -- listed this long after the last event (your own layer is always listed)
-    return math.min(7 * 86400, math.max(48 * 3600, 2 * (def and def.max or 0) + 12 * 3600))
-end
-
 local digestVer = 0
 function ns.BumpDigest() digestVer = digestVer + 1 end
 
-local function LatestOf(r) return math.max(r.down or 0, r.seen or 0, r.spawn or 0) end
+local function LatestOf(r) return math.max(r.down or 0, r.seen or 0) end
 
--- Drop records past their keep time; if a rare has too many layers, drop the stalest.
+-- Drop records past KEEP; if a rare has too many layers, drop the stalest.
 -- `protect` is a record being created right now: it is still empty, so it would look like the stalest.
 function ns.PruneDef(def, t, protect)
     t = t or ns.Now()
-    local keep, n = ns.KeepFor(def), 0
+    local n = 0
     for layer, r in pairs(def.layers or {}) do
-        if layer ~= protect and t - LatestOf(r) > keep then def.layers[layer] = nil else n = n + 1 end
+        if layer ~= protect and t - LatestOf(r) > KEEP then def.layers[layer] = nil else n = n + 1 end
     end
     while n > MAX_LAYERS do
         local oldL, oldT
@@ -246,9 +203,6 @@ function ns.PruneDef(def, t, protect)
     end
 end
 
----------------------------------------------------------------------------
--- Database
----------------------------------------------------------------------------
 function ns.RebuildIndex()
     ns.byId, ns.byName, ns.list = {}, {}, {}
     for key, def in pairs(ns.db.mobs) do
@@ -260,48 +214,42 @@ function ns.RebuildIndex()
     table.sort(ns.list, function(a, b) return a.name < b.name end)
 end
 
+-- Tracked rares only.
 function ns.Lookup(id, name)
     return (id and ns.byId[id]) or (name and ns.byName[Key(name)]) or nil
 end
 
-function ns.AddMob(name, id, min, max)
+local function AddMob(name, id)
     name = strtrim(name or "")
-    if name == "" then return nil, "Enter the mob's name." end
-    if name:find(":") then return nil, "The name can't contain ':'." end
-    min, max = tonumber(min), tonumber(max)
-    if not min or not max then return nil, "Enter the respawn time in hours (min and max)." end
-    if min <= 0 or max < min then return nil, "Respawn: min must be above 0 and max must be >= min." end
-    if max > 7 * 86400 then return nil, "Respawn max is limited to 7 days." end
-    id = tonumber(id)
-    if id and (id <= 0 or id ~= math.floor(id)) then return nil, "NPC ID must be a whole number." end
+    if name == "" or name:find(":") then return nil end
     local key = Key(name)
     local def = ns.db.mobs[key]
-    local isNew = not def
-    if def then
-        def.name, def.min, def.max = name, min, max
-        if id then def.id = id end
-    else
-        def = { name = name, id = id, min = min, max = max, enabled = true, alert = true, layers = {} }
-        ns.db.mobs[key] = def
-        -- adopt everything recorded while this rare was untracked
-        local sh = id and ns.db.shadow and ns.db.shadow[id]
-        if sh then
-            def.layers, def.samples = sh.layers or {}, sh.samples
-            ns.db.shadow[id] = nil
-        end
+    if def then return def, false end
+    def = { name = name, id = id, layers = {} }
+    ns.db.mobs[key] = def
+    -- adopt everything recorded while this rare was untracked
+    local sh = id and ns.db.shadow[id]
+    if sh then
+        def.layers = sh.layers or {}
+        ns.db.shadow[id] = nil
     end
     ns.RebuildIndex()
     digestVer = digestVer + 1
     ns.Changed()
-    return def, isNew
+    return def, true
+end
+
+function ns.TrackRare(id)
+    local info = ns.RareInfo(id)
+    if not info then return nil, "Unknown rare." end
+    return AddMob(info.name, id)
 end
 
 function ns.RemoveMob(def)
     ns.db.mobs[Key(def.name)] = nil
-    -- keep its data so timers survive untracking (and keep sharing it)
+    -- keep its data, so it is still listed when you're in its zone (and still shared)
     if def.id and ns.RareInfo(def.id) then
-        ns.db.shadow[def.id] = { name = def.name, id = def.id, min = def.min, max = def.max, layers = def.layers,
-            samples = def.samples, shadow = true, enabled = true, alert = false }
+        ns.db.shadow[def.id] = { name = def.name, id = def.id, layers = def.layers, shadow = true }
     end
     ns.RebuildIndex()
     digestVer = digestVer + 1
@@ -321,7 +269,7 @@ function ns.GetRec(def, layer)
     return r
 end
 
--- The same kill reported again (another player, another layer label) is one history entry.
+-- The same kill reported again (another player, another layer key) is one history entry.
 local function InHistory(h, name, kind, t)
     for i = 1, math.min(#h, 60) do
         local e = h[i]
@@ -330,7 +278,6 @@ local function InHistory(h, name, kind, t)
     return false
 end
 
--- Merge duplicates already saved (keeps the first, newest-first list).
 function ns.DedupeHistory()
     local h, out = ns.db.history, {}
     table.sort(h, function(x, y) return (x.t or 0) > (y.t or 0) end)
@@ -353,9 +300,10 @@ local function AddHistory(def, kind, layer, t, src)
     for i = #h, HISTORY_MAX + 1, -1 do h[i] = nil end
 end
 
--- Returns true if the event changed what we know.
+-- Returns true if the event changed what we know. Kinds: DOWN (killed), TAME (tamed), SEEN (alive).
 function ns.ApplyEvent(def, kind, layer, t, src)
     if not def or not t then return false end
+    if kind ~= "DOWN" and kind ~= "TAME" and kind ~= "SEEN" then return false end
     if t > ns.Now() + 120 then return false end
     layer = layer or "?"
     if not def.layers[layer] then
@@ -373,88 +321,82 @@ function ns.ApplyEvent(def, kind, layer, t, src)
         if r.down and math.abs(r.down - t) < 120 then return false end
         if r.down and t < r.down then return false end
         r.down, r.downKind, r.downSrc = t, kind, src
-        r.notifiedOpen = nil
-        if r.spawn and r.spawn <= t then r.spawn, r.spawnSrc = nil, nil end
         if r.seen and r.seen <= t then r.seen, r.seenSrc = nil, nil end
         AddHistory(def, kind, layer, t, src)
         digestVer = digestVer + 1
         return true
-    elseif kind == "SEEN" then
+    else
         if r.down and t <= r.down then return false end
-        if r.seen and t < r.seen + 300 then return false end
-        local firstSighting = not (r.seen or r.spawn)
-        if firstSighting and r.down then AddSample(def, r.down, t, false) end
+        if r.seen and t < r.seen + 300 then return false end    -- refreshed every 5 minutes while it stays up
+        local newSighting = not r.seen or t - r.seen > 1800
         r.seen, r.seenSrc = t, src
-        if firstSighting then AddHistory(def, kind, layer, t, src) end
-        return true
-    elseif kind == "SPAWN" then
-        if r.down and t <= r.down then return false end
-        if r.spawn and math.abs(r.spawn - t) < 60 then return false end
-        local first = not r.spawn
-        if r.down then AddSample(def, r.down, t, true) end
-        r.spawn, r.spawnSrc = t, src
-        if first then AddHistory(def, kind, layer, t, src) end
-        digestVer = digestVer + 1
+        if newSighting then AddHistory(def, kind, layer, t, src) end
         return true
     end
-    return false
+end
+
+---------------------------------------------------------------------------
+-- Saved data
+---------------------------------------------------------------------------
+-- 0.7 and older kept respawn windows, measured respawns and layer names. 0.8 only keeps kills and sightings.
+local function Upgrade(db)
+    if (db.v or 0) >= 3 then return end
+    db.muted = db.muted or {}
+    for key, def in pairs(db.mobs or {}) do
+        if def.alert == false then db.muted[def.id or key] = true end
+        def.alert, def.enabled, def.min, def.max, def.samples, def.respawnSrc = nil, nil, nil, nil, nil, nil
+    end
+    for _, def in pairs(db.shadow or {}) do
+        def.alert, def.enabled, def.min, def.max, def.samples = nil, nil, nil, nil, nil
+    end
+    for _, set in ipairs({ db.mobs or {}, db.shadow or {} }) do
+        for _, def in pairs(set) do
+            for _, r in pairs(def.layers or {}) do
+                r.spawn, r.spawnSrc, r.notifiedOpen = nil, nil, nil
+            end
+        end
+    end
+    -- history from spawn-time reads; it only ever repeated a sighting
+    local keep = {}
+    for _, e in ipairs(db.history or {}) do if e.k ~= "SPAWN" then keep[#keep + 1] = e end end
+    db.history = keep
+    db.layerNames, db.decodeSpawn, db.shareAlerts, db.hidden, db.locked, db.pos = nil, nil, nil, nil, nil, nil
+    db.v = 3
 end
 
 function ns.InitDB()
     RareWatchDB = RareWatchDB or {}
     local db = RareWatchDB
     ns.db = db
+    db.mobs = (type(db.mobs) == "table" and (db.v or 0) >= 2) and db.mobs or {}
     db.opt = db.opt or {}
+    db.history = db.history or {}
+    db.letters = db.letters or {}      -- layer id -> letter, for this login
+    db.discovered = db.discovered or {}
+    db.confirmed = db.confirmed or {}
+    db.shadow = db.shadow or {}
+    db.muted = db.muted or {}
+    Upgrade(db)
     for k, v in pairs(DEFAULT_OPT) do
         if db.opt[k] == nil then db.opt[k] = v end
     end
+    for _, k in ipairs(OLD_OPT) do db.opt[k] = nil end
     ns.opt = db.opt
-    db.history = db.history or {}
-    db.layerNames = db.layerNames or {}
-    db.letters = db.letters or {}      -- layer id -> letter, for this login (private-number builds)
-    db.discovered = db.discovered or {}
-    if db.history and #db.history > 1 then ns.DedupeHistory() end
-    db.confirmed = db.confirmed or {}
-    db.shadow = db.shadow or {}
-
-    if db.v ~= 2 then
-        -- migrate v0.1 data
-        local old = db.mobs
-        db.mobs = {}
-        if db.decodeSpawn ~= nil then db.opt.decodeSpawn = db.decodeSpawn end
-        if db.shareAlerts ~= nil then db.opt.shareAlerts = db.shareAlerts end
-        if db.hidden ~= nil then db.opt.showTracker = not db.hidden end
-        if db.locked ~= nil then db.opt.lockTracker = db.locked end
-        if db.pos then db.trackerPos = db.pos end
-        db.decodeSpawn, db.shareAlerts, db.hidden, db.locked, db.pos = nil, nil, nil, nil, nil
-        db.v = 2
-        ns.RebuildIndex()
-        for _, d in ipairs(ns.DEFAULT_MOBS) do
-            local def = ns.AddMob(d.name, d.id, d.min, d.max)
-            local oldRecs = type(old) == "table" and old[d.id]
-            if def and type(oldRecs) == "table" then
-                for layer, r in pairs(oldRecs) do
-                    if type(r) == "table" then def.layers[layer] = r end
-                end
-            end
-        end
-    end
+    if #db.history > 1 then ns.DedupeHistory() end
 
     -- prune stale records; reset session-only fields
     local t = ns.Now()
     for _, def in pairs(db.mobs) do
-        def.enabled = true -- v0.4 removed the per-mob on/off switch
-        if def.alert == nil then def.alert = true end
         def.layers = def.layers or {}
         for _, r in pairs(def.layers) do r.heard = nil end
         ns.PruneDef(def, t)
     end
     for id, def in pairs(db.shadow) do
-        def.shadow, def.enabled, def.alert = true, true, false
+        def.shadow = true
         def.layers = def.layers or {}
         for _, r in pairs(def.layers) do r.heard = nil end
         ns.PruneDef(def, t)
-        if next(def.layers) == nil and not def.samples then db.shadow[id] = nil end
+        if next(def.layers) == nil then db.shadow[id] = nil end
     end
     -- rares found in game that nobody has seen for two months
     for id, d in pairs(db.discovered) do
@@ -462,29 +404,28 @@ function ns.InitDB()
     end
     ns.RebuildIndex()
     ns.BuildRareIndex()
-    for _, d in ipairs(ns.DEFAULT_MOBS) do
-        local def = ns.byId[d.id]
-        if def and not def.respawnSrc then def.respawnSrc = "database estimate" end
-    end
 end
 
 ---------------------------------------------------------------------------
--- Rare database (built-in Forever list + rares discovered in-game)
+-- Rare database (built-in Forever list + rares discovered in game)
 ---------------------------------------------------------------------------
 ns.rareIndex = {}
+ns.rareByName = {}
+local zoneCache = {}
 
 local function AddDiscoveredInfo(id, d)
-    if ns.rareByName then ns.rareByName[Key(d.n)] = id end
+    ns.rareByName[Key(d.n)] = id
     ns.rareIndex[id] = {
         id = id, name = d.n, rank = (d.c == "rareelite") and 2 or 4, minl = d.lv, maxl = d.lv,
         zone = d.z, ui = d.ui, coords = (d.x and d.y) and { d.x, d.y } or nil, discovered = true,
     }
+    wipe(zoneCache)
 end
 
-ns.rareByName = {}
 function ns.BuildRareIndex()
     wipe(ns.rareIndex)
     wipe(ns.rareByName)
+    wipe(zoneCache)
     for id, r in pairs(ns.RARE_DB or {}) do
         local z = ns.RARE_ZONES[r[5]]
         ns.rareIndex[id] = {
@@ -500,19 +441,60 @@ end
 
 function ns.RareInfo(id) return id and ns.rareIndex[id] end
 
--- Rares you don't track still get timers: their data lives in "shadow" entries (db.shadow[id]).
+function ns.Zone()
+    local z = GetRealZoneText and GetRealZoneText()
+    return (type(z) == "string" and z ~= "") and z or nil
+end
+
+-- Every known rare that lives in a zone, by name.
+function ns.ZoneRares(zone)
+    zone = zone or ns.Zone()
+    if not zone then return {} end
+    local list = zoneCache[zone]
+    if not list then
+        list = {}
+        for _, info in pairs(ns.rareIndex) do
+            if info.zone == zone then list[#list + 1] = info end
+        end
+        table.sort(list, function(a, b) return a.name < b.name end)
+        zoneCache[zone] = list
+    end
+    return list
+end
+
+-- The rare's zone, for tracked rares too.
+function ns.ZoneOf(def)
+    local info = def and ns.RareInfo(def.id)
+    return info and info.zone
+end
+
+-- Watched: tracked, or living in the zone you're in. Watched rares get alerts and show in the status box.
+function ns.IsWatched(def)
+    if not def then return false end
+    if ns.Lookup(def.id, def.name) then return true end
+    local z = ns.ZoneOf(def)
+    return z ~= nil and z == ns.Zone()
+end
+
+local function MuteKey(def) return def.id or Key(def.name) end
+function ns.IsMuted(def) return def and ns.db.muted[MuteKey(def)] == true end
+function ns.SetMuted(def, on)
+    ns.db.muted[MuteKey(def)] = on and true or nil
+    ns.Changed()
+end
+
+-- Rares you don't track still get their kills and sightings recorded: in "shadow" entries (db.shadow[id]).
 function ns.ShadowDef(id, create)
     local d = ns.db.shadow[id]
     if d or not create then return d end
     local info = ns.RareInfo(id)
     if not info then return nil end
-    local mn, mx = ns.DefaultRespawn(id)
-    d = { name = info.name, id = id, min = mn, max = mx, layers = {}, shadow = true, enabled = true, alert = false }
+    d = { name = info.name, id = id, layers = {}, shadow = true }
     ns.db.shadow[id] = d
     return d
 end
 
--- Tracked mob, or the shadow entry for any known rare (created on demand unless create == false).
+-- Tracked rare, or the shadow entry for any known rare (created on demand unless create == false).
 function ns.LookupAny(id, name, create)
     local def = ns.Lookup(id, name)
     if def then return def end
@@ -534,150 +516,94 @@ function ns.LastSeenInForever(id)
     local def = ns.LookupAny(id, nil, false)
     if def then
         for _, r in pairs(def.layers) do
-            local a = math.max(r.seen or 0, r.spawn or 0)
-            if a > 0 and a > (best or 0) then best = a end
+            if r.seen and r.seen > (best or 0) then best = r.seen end
         end
     end
     return best
 end
 
-function ns.DefaultRespawn(id)
-    local info = ns.RareInfo(id)
-    if info and info.rmin and info.rmax and info.rmax > 0 then
-        return math.max(info.rmin, 60), math.max(info.rmax, info.rmin, 60), "database estimate"
-    end
-    return ns.opt.defaultMin, math.max(ns.opt.defaultMax, ns.opt.defaultMin), "default guess"
-end
-
-function ns.TrackRare(id)
-    local info = ns.RareInfo(id)
-    if not info then return nil, "Unknown rare." end
-    local mn, mx, src = ns.DefaultRespawn(id)
-    local def, isNew = ns.AddMob(info.name, id, mn, mx)
-    if def and isNew then def.respawnSrc = src end
-    return def, isNew
-end
-
--- Measured respawns: one sample per kill/tame, keyed by the kill time.
-AddSample = function(def, down, spawnedAt, exact)
-    local d = spawnedAt - down
-    if d < 60 or d > math.min(14 * 86400, math.max(72 * 3600, 2 * (def.max or 0))) then return end
-    def.samples = def.samples or {}
-    local old = def.samples[down]
-    if old and old.e and not exact then return end
-    if old and not old.e and not exact and old.d <= d then return end
-    def.samples[down] = { d = d, e = exact or nil }
-    local keys = {}
-    for k in pairs(def.samples) do keys[#keys + 1] = k end
-    if #keys > 40 then
-        table.sort(keys)
-        for i = 1, #keys - 40 do def.samples[keys[i]] = nil end
-    end
-end
-
-function ns.SampleStats(def)
-    local all, exact = {}, 0
-    for _, s in pairs(def.samples or {}) do
-        all[#all + 1] = s.d
-        if s.e then exact = exact + 1 end
-    end
-    if #all == 0 then return nil end
-    table.sort(all)
-    local n = #all
-    local med = (n % 2 == 1) and all[(n + 1) / 2] or math.floor((all[n / 2] + all[n / 2 + 1]) / 2)
-    return { n = n, exact = exact, min = all[1], max = all[n], median = med }
-end
-
-function ns.ApplyMeasured(def)
-    local st = ns.SampleStats(def)
-    if not st or st.n < 3 then return false, "Need at least 3 measured respawns." end
-    def.min, def.max, def.respawnSrc = st.min, math.max(st.max, st.min), "measured"
-    ns.Changed()
-    return true, string.format("Respawn set to %s - %s from %d measurements.", ns.Dur(st.min), ns.Dur(st.max), st.n)
-end
-
 ---------------------------------------------------------------------------
--- Status
+-- Reports and status
 ---------------------------------------------------------------------------
-function ns.RecStatus(def, r, t)
+-- Who a record's news came from, for showing: "You", or the player whose layer it is.
+function ns.Reporter(layer, src)
+    local owner = ns.KeyOwner(layer)
+    if not owner then
+        if src == "you" then return "You" end
+        return (src and src ~= "" and Short(src)) or "Someone"
+    end
+    if ns.me and ns.OwnerIs(ns.me, owner) then return "You" end
+    return ns.FullName(owner, src) or owner
+end
+
+-- One layer record, as what it tells you. nil when it is too old to mean anything.
+function ns.Report(def, layer, r, t)
     t = t or ns.Now()
-    local s = { latest = math.max(r.down or 0, r.seen or 0, r.spawn or 0) }
-    if r.seen or r.spawn then
-        s.code = (r.seen and t - r.seen < 1800) and "UP" or "STALE"
-        if r.seen then
-            s.text = "seen " .. ns.Dur(t - r.seen) .. " ago"
-            if r.spawn then s.text = s.text .. ", spawned " .. ns.Dur(t - r.spawn) .. " ago" end
-            s.src = r.seenSrc
-        else
-            s.text = "spawned " .. ns.Dur(t - r.spawn) .. " ago"
-            s.src = r.spawnSrc
-        end
-        s.sort = t - (r.seen or r.spawn)
-    elseif r.down then
-        local el = t - r.down
-        s.windowFrom, s.windowTo = r.down + def.min, r.down + def.max
-        s.src = r.downSrc
-        if el < def.min then
-            s.code, s.text, s.sort = "WAIT", "opens in " .. ns.Dur(def.min - el), def.min - el
-        elseif el < def.max then
-            s.code, s.text, s.sort = "OPEN", "closes in " .. ns.Dur(def.max - el), def.max - el
-        else
-            s.code, s.text, s.sort = "DUE", "window ended " .. ns.Dur(el - def.max) .. " ago", el - def.max
-        end
+    local seen, down = r.seen or 0, r.down or 0
+    local rep
+    if seen > 0 and seen > down then
+        local age = t - seen
+        if age > SEEN_FOR then return nil end
+        rep = { code = age <= ns.FRESH and "UP" or "SEEN", at = seen, kind = "SEEN", who = ns.Reporter(layer, r.seenSrc) }
+    elseif down > 0 then
+        if t - down > KILL_FOR then return nil end
+        rep = { code = "KILLED", at = down, kind = r.downKind or "DOWN", who = ns.Reporter(layer, r.downSrc) }
     else
-        s.code, s.text, s.sort = "NONE", "no data", 0
+        return nil
     end
-    s.prio = PRIO[s.code]
-    return s
+    rep.layer, rep.rec, rep.prio = layer, r, PRIO[rep.code]
+    return rep
 end
 
-function ns.Layers(def, withCurrent)
+-- Every report for a rare: up first, then newest first.
+function ns.Reports(def)
     local t, out = ns.Now(), {}
-    local cur = ns.LayerFor(def)
-    local show, haveCur = ns.ShowFor(def), false
+    if not def or not def.layers then return out end
     for layer, r in pairs(def.layers) do
-        local st = ns.RecStatus(def, r, t)
-        -- your own layer stays listed however old its record is (until it is pruned)
-        if st.latest > 0 and (t - st.latest < show or layer == cur) then
-            st.layer, st.rec = layer, r
-            table.insert(out, st)
-            if layer == cur then haveCur = true end
-        end
-    end
-    if withCurrent and cur and not haveCur then
-        table.insert(out, { code = "NONE", text = "no reports yet", prio = 9, sort = 0, latest = 0, layer = cur, rec = {}, empty = true })
+        local rep = ns.Report(def, layer, r, t)
+        if rep then out[#out + 1] = rep end
     end
     table.sort(out, function(a, b)
-        local ac, bc = a.layer == cur, b.layer == cur
-        if ac ~= bc then return ac end
-        if a.prio ~= b.prio then return a.prio < b.prio end
-        return a.sort < b.sort
+        if (a.code == "UP") ~= (b.code == "UP") then return a.code == "UP" end
+        return a.at > b.at
     end)
     return out
 end
 
-local NONE_STATUS = { code = "NONE", text = "no data", prio = 9, sort = 0 }
-function ns.Summary(def)
-    local L = ns.Layers(def)
-    return L[1] or NONE_STATUS, #L
+local NONE = { code = "NONE", prio = 9, at = 0 }
+-- The rare's state: up if anyone sees it now, otherwise the newest news (a sighting or a kill).
+function ns.Status(def)
+    local reps = ns.Reports(def)
+    return reps[1] or NONE, reps
+end
+
+-- "Up · Bob sees it", "Killed by Bob", "Seen by you" ... without the time.
+function ns.ReportText(rep)
+    if not rep or rep.code == "NONE" then return "No reports" end
+    local who = rep.who or "Someone"
+    local you = who == "You"
+    if rep.code == "UP" then return you and "You see it" or (who .. " sees it") end
+    if rep.code == "SEEN" then return "Seen by " .. (you and "you" or who) end
+    return (rep.kind == "TAME" and "Tamed by " or "Killed by ") .. (you and "you" or who)
 end
 
 ---------------------------------------------------------------------------
 -- Sharing: automatic, two-way, relayed. Nobody ever has to ask.
 --   E  single event         B  batch of events      H  hello: version + summary of what we know
---   D  rare discovered      C  known rare confirmed  R  (manual) resync
+--   D  rare discovered      C  known rare confirmed  R  resync
+--   J/j/Q  join requests (whispers, see Join.lua)
 ---------------------------------------------------------------------------
 local queue, queued = {}, {}
 local nextSend = 0
-local KIND_CODE = { DOWN = "D", TAME = "T", SEEN = "S", SPAWN = "P" }
-local CODE_KIND = { D = "DOWN", T = "TAME", S = "SEEN", P = "SPAWN" }
+local KIND_CODE = { DOWN = "D", TAME = "T", SEEN = "S" }
+local CODE_KIND = { D = "DOWN", T = "TAME", S = "SEEN" }   -- "P" (spawn times, 0.7 and older) is ignored
 
 local function Destinations()
     local d = {}
     if ns.opt.shareGuild and IsInGuild() then d[#d + 1] = { "GUILD" } end
     local id = GetChannelName(CHANNEL)
     if id and id > 0 then d[#d + 1] = { "CHANNEL", id } end
-    if ns.opt.shareGroup and not IsInInstance() then
+    if ns.opt.shareGroup and not ns.InInstance() then
         if IsInRaid and IsInRaid() then d[#d + 1] = { "RAID" }
         elseif IsInGroup and IsInGroup() then d[#d + 1] = { "PARTY" } end
     end
@@ -708,18 +634,16 @@ local function Send(msg, urgent)
     if urgent then table.insert(queue, 1, msg) else table.insert(queue, msg) end
 end
 
--- On private-number builds a layer can't be matched between players, so what travels is the layer as its owner
--- sees it: "<player>.<letter>". Keys that already have that shape (relayed from someone else) pass unchanged.
+-- Our own layer goes out as "<player>.<letter>". Keys that already have that shape (relayed) pass unchanged.
 local function ShareKey(layer)
-    if not ns.Private() or not layer or layer == "?" or layer:find(".", 1, true) then return layer end
+    if not layer or layer == "?" or layer:find(".", 1, true) then return layer end
     local label = tostring(ns.LayerShort(layer)):gsub("[^%w_%-]", ""):sub(1, 8)
-    local who = (ns.me or "me"):gsub("[^%w_%-]", ""):sub(1, 12)
+    local who = Clean(First(ns.me or "me")):sub(1, 12)
     return who .. "." .. (label ~= "" and label or "?")
 end
 
 local function Broadcast(def, kind, layer, t, urgent)
-    layer = ShareKey(layer)
-    Send(table.concat({ "E", PROTO, def.id or 0, def.name, kind, layer or "?", math.floor(t) }, ":"), urgent)
+    Send(table.concat({ "E", PROTO, def.id or 0, def.name, kind, ShareKey(layer) or "?", math.floor(t) }, ":"), urgent)
 end
 
 function ns.IsSharing()
@@ -729,14 +653,10 @@ end
 -- Everything worth passing on right now: { def, kind, layer, time, record }.
 local function Shareable(t)
     local out = {}
-    local function add(def, kind, layer, when, r) out[#out + 1] = { def, kind, layer, when, r } end
     for _, def in ipairs(ns.AllDefs()) do
         for layer, r in pairs(def.layers) do
-            local info = ns.RareInfo(def.id)
-            local win = math.min(7 * 86400, math.max(def.max or 0, info and info.rmax or 0)) + 6 * 3600
-            if r.down and t - r.down < win then add(def, r.downKind or "DOWN", layer, r.down, r) end
-            if r.spawn and t - r.spawn < 24 * 3600 then add(def, "SPAWN", layer, r.spawn, r) end
-            if r.seen and t - r.seen < 6 * 3600 then add(def, "SEEN", layer, r.seen, r) end
+            if r.down and t - r.down < KILL_FOR then out[#out + 1] = { def, r.downKind or "DOWN", layer, r.down, r } end
+            if r.seen and t - r.seen < SEEN_FOR then out[#out + 1] = { def, "SEEN", layer, r.seen, r } end
         end
     end
     return out
@@ -748,10 +668,9 @@ local function Hash(str)
     return h
 end
 
--- Short summary of our kills/tames/spawns. Peers compare it with theirs to notice missing data.
+-- Short summary of our kills and tames. Peers compare it with theirs to notice missing data.
 -- (Sightings are left out: they change every few minutes and would cause constant resyncs.)
--- The window is the rare's built-in respawn, not the local setting, so users who edited their timers still agree.
--- The result is cached: it only changes when our data does (or as events age out, so at most a minute stale).
+-- Cached: it only changes when our data does (or as kills age out, so at most a minute stale).
 local digestCache
 function ns.Digest()
     local now = GetTime()
@@ -761,11 +680,7 @@ function ns.Digest()
     local t, keys = ns.Now(), {}
     for _, e in ipairs(Shareable(t)) do
         if e[2] ~= "SEEN" then
-            local info = ns.RareInfo(e[1].id)
-            local win = math.min(7 * 86400, (info and info.rmax) or (12 * 3600)) + 6 * 3600
-            if t - e[4] < win then
-                keys[#keys + 1] = (e[1].id or e[1].name) .. "/" .. ShareKey(e[3]) .. "/" .. KIND_CODE[e[2]] .. "/" .. math.floor(e[4] / 600)
-            end
+            keys[#keys + 1] = (e[1].id or e[1].name) .. "/" .. ShareKey(e[3]) .. "/" .. KIND_CODE[e[2]] .. "/" .. math.floor(e[4] / 600)
         end
     end
     table.sort(keys)
@@ -774,19 +689,20 @@ function ns.Digest()
     return n, h
 end
 
+local function DiscoveryMsg(id, d)
+    return table.concat({ "D", PROTO, id, d.n, d.c, d.z or "?", d.ui or 0, d.x or 0, d.y or 0, d.lv or 0, d.last }, ":")
+end
+
+-- Rares discovered in game and confirmed rares: only sent once after login and when someone asks for a resync.
+-- (They used to go out with every sync, up to 40 messages each time.)
+local discoveriesDue = true
 local function SendDiscoveries(t)
     local m = 0
     for id, d in pairs(ns.db.discovered) do
-        if m < 20 and d.last and t - d.last < 7 * 86400 then
-            Send(table.concat({ "D", PROTO, id, d.n, d.c, d.z or "?", d.ui or 0, d.x or 0, d.y or 0, d.lv or 0, d.last }, ":"))
-            m = m + 1
-        end
+        if m < 20 and d.last and t - d.last < 7 * 86400 then Send(DiscoveryMsg(id, d)); m = m + 1 end
     end
     for id, ct in pairs(ns.db.confirmed) do
-        if m < 40 and t - ct < 7 * 86400 then
-            Send(table.concat({ "C", PROTO, id, ct }, ":"))
-            m = m + 1
-        end
+        if m < 40 and t - ct < 7 * 86400 then Send(table.concat({ "C", PROTO, id, ct }, ":")); m = m + 1 end
     end
 end
 
@@ -817,8 +733,10 @@ local function Push(since)
         e[5].heard = GetTime()
     end
     flush()
-    SendDiscoveries(t)
-    ns.lastPushAt = GetTime()
+    if discoveriesDue then
+        discoveriesDue = false
+        SendDiscoveries(t)
+    end
 end
 
 local pushPending, lastPush = false, -1000
@@ -840,7 +758,6 @@ local function SendHello()
     Send("HELLO")
     lastHello = GetTime()
 end
-ns.SendHello = SendHello
 
 function ns.OnlineUsers()
     local n, now = 0, GetTime()
@@ -852,11 +769,11 @@ function ns.OnlineUsers()
 end
 
 function ns.SyncNow()
+    discoveriesDue = true
     SendHello()
     Send("R:" .. PROTO)
     SchedulePush()
 end
-ns.RequestSync = ns.SyncNow
 
 -- The sync channel only carries addon data. We never touch the chat windows (editing them
 -- can taint the UI and trigger "blocked from an action" warnings); we just hide its join notices.
@@ -871,7 +788,6 @@ if ChatFrame_AddMessageEventFilter then
     pcall(ChatFrame_AddMessageEventFilter, "CHAT_MSG_CHANNEL_NOTICE", ChannelNoticeFilter)
     pcall(ChatFrame_AddMessageEventFilter, "CHAT_MSG_CHANNEL_NOTICE_USER", ChannelNoticeFilter)
 end
-function ns.HideChannel() end
 
 -- Joining a channel needs a click or key press, so this only runs from one.
 -- After the first join the game keeps you in the channel on every login.
@@ -883,10 +799,7 @@ function ns.SetChannel(on)
         if GetChannelName(CHANNEL) > 0 then LeaveChannelByName(CHANNEL) end
     end
     C_Timer.After(1.5, function()
-        if GetChannelName(CHANNEL) > 0 then
-            ns.HideChannel()
-            ns.SyncNow()
-        end
+        if GetChannelName(CHANNEL) > 0 then ns.SyncNow() end
         ns.Changed()
     end)
 end
@@ -898,7 +811,7 @@ function ns.EnsureChannel()
         JoinPermanentChannel(CHANNEL)
         C_Timer.After(1.5, function()
             ns.joining = false
-            if GetChannelName(CHANNEL) > 0 then ns.HideChannel(); ns.SyncNow() end
+            if GetChannelName(CHANNEL) > 0 then ns.SyncNow() end
             ns.Changed()
         end)
     end
@@ -935,12 +848,55 @@ function ns.BigText(text)
     end)
 end
 
-function ns.Alert(text)
+-- The one way RareWatch gets your attention; every switch in Settings > Alerts applies to it.
+-- big == false: chat line and sound only (a kill, a rare in another zone).
+function ns.Alert(text, big)
     local o = ns.opt
-    if o.alertRaidWarn then ns.BigText(text) end
+    if big ~= false then
+        if o.alertRaidWarn then ns.BigText(text) end
+        if o.alertFlash and FlashClientIcon then FlashClientIcon() end
+    end
     if o.alertSound then ns.PlayAlertSound() end
-    if o.alertFlash and FlashClientIcon then FlashClientIcon() end
     if o.alertChat then ns.Print(text) end
+end
+
+-- A sighting is announced once. While the rare stays up (it is reported again every few minutes, by everyone
+-- near it) nothing more is said; only after it has gone quiet for ns.FRESH does a sighting count as news again.
+local upActivity = {}       -- rare -> last time anyone reported it alive
+local killSaid = {}         -- rare -> kill time we last announced
+local function RareKey(def) return def.id or Key(def.name) end
+
+-- Returns true if this sighting is news.
+local function SightingIsNews(def, t)
+    local k = RareKey(def)
+    local last = upActivity[k]
+    if not last or t > last then upActivity[k] = t end
+    return not last or t - last > ns.FRESH
+end
+
+local function WhereText(def)
+    local z = ns.ZoneOf(def)
+    if z and z ~= ns.Zone() then return " in " .. z end
+    return ""
+end
+
+-- Someone else reported a rare alive (age: seconds since).
+local function AnnounceSighting(def, who, t)
+    if not SightingIsNews(def, t) then return end
+    if ns.Now() - t > ns.FRESH or not ns.IsWatched(def) or ns.IsMuted(def) then return end
+    local here = WhereText(def) == ""
+    local hint = (here and ns.opt.showTracker) and ", Join in the RareWatch box" or ""
+    ns.Alert(def.name .. " is up" .. WhereText(def) .. "  -  " .. who .. " sees it" .. hint, here)
+end
+
+local function AnnounceKill(def, kind, who, t)
+    local k = RareKey(def)
+    if killSaid[k] and math.abs(killSaid[k] - t) < 300 then return end
+    killSaid[k] = t
+    if ns.Now() - t > ns.FRESH or not ns.IsWatched(def) or ns.IsMuted(def) then return end
+    if ns.opt.alertChat then
+        ns.Print(def.name .. (kind == "TAME" and " was tamed by " or " was killed by ") .. who .. WhereText(def) .. ".")
+    end
 end
 
 -- Record something WE observed: store, share, notify UI.
@@ -948,39 +904,18 @@ local function Record(def, kind, layer, t)
     if ns.ApplyEvent(def, kind, layer, t, "you") then
         ns.GetRec(def, layer).heard = GetTime()
         Broadcast(def, kind, layer, t, true)
-        if (kind == "DOWN" or kind == "TAME") and not def.shadow then
-            ns.Print(string.format("%s %s on layer %s. Next window: %s - %s.", def.name,
-                kind == "TAME" and "tamed" or "killed", ns.LayerName(layer),
-                ns.Day(t + def.min), ns.Day(t + def.max)))
-        end
+        if kind == "SEEN" then SightingIsNews(def, t) else killSaid[RareKey(def)] = t end
         ns.Changed()
     end
-end
-
-function ns.ManualLog(def, kind, mins, layerInput)
-    mins = tonumber(mins or "") or 0
-    if mins < 0 or mins > 2880 then return false, "Minutes ago must be between 0 and 2880." end
-    local layer = ns.ResolveLayer(layerInput) or ((mins == 0) and ns.LayerFor(def)) or "?"
-    if layer:find("[:/;]") then return false, "Invalid layer." end
-    local t = ns.Now() - math.floor(mins * 60)
-    if ns.ApplyEvent(def, kind, layer, t, "manual") then
-        ns.GetRec(def, layer).heard = GetTime()
-        Broadcast(def, kind, layer, t, true)
-        ns.Changed()
-        return true, string.format("Logged %s on layer %s at %s.",
-            ns.EVENT_INFO[kind].label:lower(), ns.LayerName(layer), ns.Day(t))
-    end
-    return false, "Nothing changed - duplicate, or older than what's already known."
 end
 
 ---------------------------------------------------------------------------
 -- Detection
 ---------------------------------------------------------------------------
-local lastGUID, lastSeenAt, alerted, pendingTame = {}, {}, {}, {}
-local lastPetName, TAME_NAME
+local alerted, aliveSeen, deadSeen = {}, {}, {}
+local lastGUID, lastSeenAt = {}, {}
+local lastPetGUID
 
--- Layer IDs come from creature GUIDs and differ per zone, so remember them per map.
-ns.layerByMap = {}
 local function PlayerMap()
     if C_Map and C_Map.GetBestMapForUnit then
         local ok, map = pcall(C_Map.GetBestMapForUnit, "player")
@@ -989,18 +924,7 @@ local function PlayerMap()
 end
 ns.PlayerMap = PlayerMap
 
-local function SetCurrentLayer(layer)
-    if not layer then return end
-    local map = PlayerMap()
-    if map then ns.layerByMap[map] = layer end
-    if layer ~= ns.currentLayer then
-        ns.currentLayer = layer
-        ns.currentLayerZone = GetRealZoneText and GetRealZoneText() or nil
-        ns.Changed()
-    end
-end
-
--- Private-number builds (see ns.Private). How a layer is known there, following what the game tells us:
+-- How our layer is held, following what the game tells us:
 --   * a creature read when nothing is held sets the layer, and it is then held: later creatures never replace it;
 --   * SHARD_TRANSFER (the game moved the player) and ZONE_CHANGED_NEW_AREA (a zone border) make it unknown again;
 --   * creatures that were in view at such a moment belong to the layer or zone just left, so they are not read;
@@ -1011,7 +935,6 @@ ns.layerStale = true
 local SHARD_QUIET, STALE_FOR, BORDER_QUIET, KEPT_AGE = 3, 10, 15, 120
 local shardAt, borderAt, loginAt = -1000, -1000, GetTime()
 local shardSeen, borderSeen = {}, {}
-local lastTouch = 0
 
 local function LetterFor(n)
     if n <= 26 then return string.char(64 + n) end
@@ -1029,20 +952,16 @@ local function InView()
     add("target"); add("mouseover")
     return seen
 end
-
 ns.InView = InView
 
 local function Adopt(id)
-    local map = PlayerMap()
     ns.layerStale = false
-    if map then ns.layerByMap[map] = id end
     if not ns.db.letters[id] then
         ns.db.letterN = (ns.db.letterN or 0) + 1
         ns.db.letters[id] = LetterFor(ns.db.letterN)
     end
     if id ~= ns.currentLayer then
         ns.currentLayer = id
-        ns.currentLayerZone = GetRealZoneText and GetRealZoneText() or nil
         ns.Changed()
     end
 end
@@ -1087,8 +1006,7 @@ end
 
 -- Saved when the interface is torn down, so a /reload can pick the layer up again.
 function ns.LayerSave()
-    ns.db.held = ns.currentLayer and { id = ns.currentLayer, zone = GetRealZoneText and GetRealZoneText() or nil,
-        at = time(), who = ns.me } or nil
+    ns.db.held = ns.currentLayer and { id = ns.currentLayer, zone = ns.Zone(), at = time(), who = ns.me } or nil
 end
 
 local function Restore()
@@ -1096,12 +1014,9 @@ local function Restore()
     if not k or ns.currentLayer then return end
     if GetTime() - loginAt > 10 then ns.db.held = nil; return end
     if type(k.at) ~= "number" or time() - k.at > KEPT_AGE or k.who ~= ns.me then ns.db.held = nil; return end
-    local zone = GetRealZoneText and GetRealZoneText()
-    if type(zone) ~= "string" or zone == "" or zone ~= k.zone then return end    -- not named yet: tried again
+    local zone = ns.Zone()
+    if not zone or zone ~= k.zone then return end    -- not named yet: tried again
     ns.currentLayer, ns.layerStale = k.id, false
-    ns.currentLayerZone = zone
-    local map = PlayerMap()
-    if map then ns.layerByMap[map] = k.id end
     ns.Changed()
 end
 
@@ -1120,19 +1035,9 @@ function ns.LayerWorldEntered(isLogin, isReload)
     end
 end
 
--- Your layer in the zone where this mob lives (nil if you haven't been there this session).
-function ns.LayerFor(def)
-    if not def then return nil end
-    local info = ns.RareInfo(def.id)
-    local map = (info and info.ui) or def.ui
-    if map then return ns.layerByMap[map] end
-    return ns.currentLayer
-end
-
 local function PlayerPos()
-    if not (C_Map and C_Map.GetBestMapForUnit) then return end
-    local ok, map = pcall(C_Map.GetBestMapForUnit, "player")
-    if not ok or not map then return end
+    local map = PlayerMap()
+    if not map then return end
     local zone
     if C_Map.GetMapInfo then
         local info = C_Map.GetMapInfo(map)
@@ -1144,12 +1049,8 @@ local function PlayerPos()
     return map, zone, x and math.floor(x * 10 + 0.5) / 10, y and math.floor(y * 10 + 0.5) / 10
 end
 
-local function BroadcastDiscovery(id, d)
-    Send(table.concat({ "D", PROTO, id, d.n, d.c, d.z or "?", d.ui or 0, d.x or 0, d.y or 0, d.lv or 0, d.last }, ":"), true)
-end
-
 -- A rare seen alive: confirm a known one, or record a brand-new one.
-local function Discover(unit, npcId, guid)
+local function Discover(unit, npcId)
     local class = UnitClassification(unit)
     if class ~= "rare" and class ~= "rareelite" then return end
     local t = ns.Now()
@@ -1160,158 +1061,98 @@ local function Discover(unit, npcId, guid)
             Send(table.concat({ "C", PROTO, npcId, t }, ":"))
             if first then ns.Changed() end
         end
-    else
-        local d = ns.db.discovered[npcId]
-        if not d then
-            local map, zone, x, y = PlayerPos()
-            d = { n = UnitName(unit) or "?", c = class, lv = UnitLevel(unit), z = zone, ui = map, x = x, y = y,
-                first = t, last = t, src = "you" }
-            if d.n:find(":") then return end
-            local count = 0
-            for _ in pairs(ns.db.discovered) do count = count + 1 end
-            if count >= MAX_DISCOVERED then return end
-            ns.db.discovered[npcId] = d
-            AddDiscoveredInfo(npcId, d)
-            ns.Print("New rare found: " .. d.n .. (zone and (" in " .. zone) or "") .. " - added to the Browse list.")
-            BroadcastDiscovery(npcId, d)
-            ns.Changed()
-        elseif t - (d.last or 0) > 300 then
-            d.last = t
-            BroadcastDiscovery(npcId, d)
-        end
+        return
     end
-    if ns.opt.alertAnyRare and not alerted[guid] and not ns.Lookup(npcId, UnitName(unit)) then
-        alerted[guid] = true
-        ns.Alert((UnitName(unit) or "Rare") .. " spotted  (not tracked)")
+    local d = ns.db.discovered[npcId]
+    if not d then
+        local name = UnitName(unit)
+        if not name or name:find(":") then return end
+        local count = 0
+        for _ in pairs(ns.db.discovered) do count = count + 1 end
+        if count >= MAX_DISCOVERED then return end
+        local map, zone, x, y = PlayerPos()
+        -- the zone a rare lives in is what the status box matches on, so use the zone's name, not a subzone's
+        zone = ns.Zone() or zone
+        d = { n = name, c = class, lv = UnitLevel(unit), z = zone, ui = map, x = x, y = y, first = t, last = t, src = "you" }
+        ns.db.discovered[npcId] = d
+        AddDiscoveredInfo(npcId, d)
+        ns.Print("New rare found: " .. d.n .. (zone and (" in " .. zone) or "") .. " - added to Browse.")
+        Send(DiscoveryMsg(npcId, d), true)
+        ns.Changed()
+    elseif t - (d.last or 0) > 300 then
+        d.last = t
+        Send(DiscoveryMsg(npcId, d), true)
     end
 end
 
--- Kill detection without the combat log: a tracked mob we can see is dead.
--- Only counts if our latest info says it was alive (avoids re-logging an old corpse).
-local deadSeen = {}
-local function CheckDeath(unit, guid, npcId, layer)
-    if deadSeen[guid] then return end
+-- Kill detection without the combat log: a rare we saw alive is now dead.
+-- Only a creature seen alive this session counts, so walking past an old corpse logs nothing.
+local function CheckDeath(unit, guid, npcId)
+    if deadSeen[guid] or not aliveSeen[guid] then return end
     local def = ns.LookupAny(npcId, UnitName(unit))
     if not def then return end
     deadSeen[guid] = true
     for u in pairs(ns.watched) do if UnitGUID(u) == guid then ns.watched[u] = nil end end
-    local r = def.layers[layer or "?"]
-    local aliveAt = r and math.max(r.seen or 0, r.spawn or 0) or 0
-    if r and r.down and r.down >= aliveAt then return end
-    ns.deathFromUnit = (ns.deathFromUnit or 0) + 1
-    Record(def, "DOWN", layer, ns.Now())
-end
-
--- RareWatch is for the open world: inside dungeons, raids and battlegrounds the elites are not world rares, and
--- the client restricts what addons may read there.
-local function InInstance()
-    local inside, kind = IsInInstance()
-    return inside and kind ~= nil and kind ~= "none"
+    Record(def, "DOWN", ns.currentLayer, ns.Now())
 end
 
 ns.watched = {}   -- nameplate units showing a known rare: polled for death (cheaper than listening to every unit's health)
 
 local function CheckUnit(unit)
-    if InInstance() then return end
-    if not UnitExists(unit) then return end
+    if ns.InInstance() or not UnitExists(unit) then return end
     local guid = UnitGUID(unit)
-    local npcId, layer, spawnUID = ns.ParseGUID(guid)
+    local npcId = ns.ParseGUID(guid)
     if not npcId then return end
-    if ns.Private() then
-        -- the layer is held, not read off every creature; with none held yet there is nothing to file a record under
-        if IsInInstance() or not ns.ReadLayer(unit, guid) then return end
-        layer = ns.currentLayer
-    elseif not IsInInstance() then
-        SetCurrentLayer(layer)
-    end
+    -- the layer is held, not read off every creature; with none held yet there is nothing to file a record under
+    if not ns.ReadLayer(unit, guid) then return end
 
     if UnitIsDead(unit) then
-        CheckDeath(unit, guid, npcId, layer)
+        CheckDeath(unit, guid, npcId)
         return
     end
-    Discover(unit, npcId, guid)
-    local def = ns.Lookup(npcId, UnitName(unit))
-    local tracked = def ~= nil
+    Discover(unit, npcId)
+    local name = UnitName(unit)
+    local def = ns.Lookup(npcId, name)
     if not def then
         local class = UnitClassification(unit)
         if class == "rare" or class == "rareelite" or (ns.RARE_DB and ns.RARE_DB[npcId]) then
-            def = ns.LookupAny(npcId, UnitName(unit))
+            def = ns.LookupAny(npcId, name)
         end
     end
-    if not def or not def.enabled then return end
+    if not def then return end
     if not def.id then def.id = npcId; ns.RebuildIndex() end
 
+    local k = RareKey(def)
+    aliveSeen[guid] = true
     if unit:find("^nameplate") then ns.watched[unit] = true end
-    lastGUID[def.name] = guid
-    lastSeenAt[def.name] = GetTime()
-    if not def.ui and not ns.RareInfo(npcId) then def.ui = PlayerMap() end
-    Record(def, "SEEN", layer, ns.Now())
-    if ns.opt.decodeSpawn then
-        local sp = DecodeSpawnTime(spawnUID)
-        if sp then Record(def, "SPAWN", layer, sp) end
-    end
-    if tracked and not alerted[guid] and def.alert then
+    lastGUID[k] = guid
+    lastSeenAt[k] = GetTime()
+    -- already announced from someone else's report in the last few minutes: no second alert for the same rare
+    local knownUp = upActivity[k] and ns.Now() - upActivity[k] <= ns.FRESH
+    Record(def, "SEEN", ns.currentLayer, ns.Now())
+    if not alerted[guid] then
         alerted[guid] = true
-        ns.Alert(def.name .. " is UP  (layer " .. ns.LayerShort(layer) .. ")")
+        if not knownUp and ns.IsWatched(def) and not ns.IsMuted(def) then ns.Alert(def.name .. " is up!") end
     end
 end
 
-local function OnCombatLog()
-    local _, sub, _, _, _, _, _, destGUID, destName, _, _, _, spellName = CombatLogGetCurrentEventInfo()
-    if sub == "UNIT_DIED" or sub == "PARTY_KILL" then
-        local npcId, layer = ns.ParseGUID(destGUID)
-        if not npcId then return end
-        local def = ns.LookupAny(npcId, destName)
-        if def then
-            pendingTame[destGUID] = nil
-            Record(def, "DOWN", layer, ns.Now())
-        end
-    elseif TAME_NAME and spellName == TAME_NAME then
-        local npcId, layer = ns.ParseGUID(destGUID)
-        if not npcId then return end
-        local def = ns.LookupAny(npcId, destName)
-        if not def then return end
-        if sub == "SPELL_AURA_APPLIED" then
-            pendingTame[destGUID] = { start = GetTime(), def = def, layer = layer }
-        elseif sub == "SPELL_AURA_REMOVED" then
-            local p = pendingTame[destGUID]
-            pendingTame[destGUID] = nil
-            if p and GetTime() - p.start >= 18 then Record(p.def, "TAME", p.layer, ns.Now()) end
-        end
-    end
-end
-
+-- A tame: a new pet that is this rare (the pet carries the creature's npc id), while the rare we saw a moment
+-- ago is gone from view. Calling a pet you tamed before does nothing: the rare itself would still be in view.
 local function OnPetChanged()
-    local name = UnitName("pet")
-    local def = name and ns.LookupAny(nil, name)
-    if def and name ~= lastPetName and lastSeenAt[def.name] and GetTime() - lastSeenAt[def.name] < 120 then
-        local _, layer = ns.ParseGUID(lastGUID[def.name])
-        Record(def, "TAME", layer or ns.currentLayer, ns.Now())
-    end
-    lastPetName = name
-end
-
--- Announce when a respawn window opens.
-local function CheckWindows()
-    if not ns.opt.windowAlert then return end
-    local t = ns.Now()
-    for _, def in ipairs(ns.list) do
-        if def.enabled then
-            for layer, r in pairs(def.layers) do
-                if r.down and not r.seen and not r.spawn and r.notifiedOpen ~= r.down then
-                    local el = t - r.down
-                    if el >= def.min and el < def.min + 300 then
-                        r.notifiedOpen = r.down
-                        ns.Print(string.format("Respawn window for %s just opened on layer %s (closes in %s).",
-                            def.name, ns.LayerName(layer), ns.Dur(def.max - el)))
-                        if ns.opt.alertSound then ns.PlayAlertSound() end
-                    elseif el >= def.min + 300 then
-                        r.notifiedOpen = r.down
-                    end
-                end
-            end
-        end
-    end
+    local guid = UnitGUID("pet")
+    if guid == lastPetGUID then return end
+    lastPetGUID = guid
+    if type(guid) ~= "string" then return end
+    local kind, _, _, _, _, npcId = strsplit("-", guid)
+    npcId = tonumber(npcId)
+    if kind ~= "Pet" or not npcId then return end
+    local def = ns.LookupAny(npcId, nil, false)
+    if not def then return end
+    local k = RareKey(def)
+    if not lastSeenAt[k] or GetTime() - lastSeenAt[k] > 60 then return end
+    if lastGUID[k] and InView()[lastGUID[k]] then return end
+    if lastGUID[k] then deadSeen[lastGUID[k]] = true end
+    Record(def, "TAME", ns.currentLayer, ns.Now())
 end
 
 ---------------------------------------------------------------------------
@@ -1324,34 +1165,26 @@ local function VersionNum(v)
     return (tonumber(a) or 0) * 10000 + (tonumber(b) or 0) * 100 + (tonumber(c) or 0)
 end
 
--- One event from another player (tracked or not). Returns true if it changed anything.
 local function ValidLayer(l)
     return type(l) == "string" and #l <= 24 and (l == "?" or l:match("^[%w%._%-]+$") ~= nil)
 end
 
-local announced = {}
+-- One event from another player (tracked or not). Returns true if it changed anything.
 local function ApplyRemote(id, name, kind, layer, t, who)
-    if not ns.EVENT_INFO[kind] or not t or not ValidLayer(layer) then return false end
-    if ns.Private() and not layer:match("^[%w_%-]+%.[%w_%-]+$") then layer = "?" end   -- only "<player>.<letter>" is understood here
+    if not kind or not t or not ValidLayer(layer) then return false end
+    if not ns.KeyOwner(layer) then layer = "?" end     -- only "<player>.<letter>" is understood
     if t < ns.Now() - 14 * 86400 then return false end
     local def = ns.LookupAny(id, name)
     if not def then return false end
     if not def.id and id then def.id = id; ns.RebuildIndex() end
     local changed = ns.ApplyEvent(def, kind, layer, t, who)
-    if def.layers[layer] then def.layers[layer].heard = GetTime() end
-    if changed and not def.shadow then
-        -- each event is announced once, however many players pass it on
-        local key = table.concat({ def.name, kind, layer, math.floor(t / 120) }, "|")
-        if announced[key] then return changed end
-        announced[key] = true
-        local age = ns.Now() - t
-        if (kind == "SEEN" or kind == "SPAWN") and age < 600 then
-            if ns.opt.shareAlerts and def.alert then ns.PlayAlertSound() end
-            ns.Print(string.format("%s reports %s UP%s.", who, def.name, " on " .. ns.LayerName(layer, true)))
-        elseif (kind == "DOWN" or kind == "TAME") and age < 3600 then
-            ns.Print(string.format("%s reports %s %s%s (%s ago).", who, def.name,
-                kind == "TAME" and "tamed" or "killed", " on " .. ns.LayerName(layer, true), ns.Dur(age)))
-        end
+    local r = def.layers[layer]
+    if r then r.heard = GetTime() end
+    if changed then
+        local reporter = ns.Reporter(layer, who)
+        if kind == "SEEN" then AnnounceSighting(def, reporter, t) else AnnounceKill(def, kind, reporter, t) end
+    elseif kind == "SEEN" and r and not (r.down and t <= r.down) then
+        SightingIsNews(def, t)    -- a repeat (not saved: too soon after the last one) still means it is up
     end
     return changed
 end
@@ -1389,7 +1222,7 @@ local function OnAddonMessage(prefix, msg, channel, sender)
         if changed then ns.ChangedSoon() end
     elseif tag == "H" then
         local version, theirHash = a, tonumber(c)
-        ns.peers[who].v = version
+        peer.v = version
         if VersionNum(version) > VersionNum(ns.VERSION) and not ns.newerVersion then
             ns.newerVersion = version
             ns.Print("A newer version of RareWatch (" .. version .. ") is out - update to stay in sync.")
@@ -1435,7 +1268,6 @@ local function OnAddonMessage(prefix, msg, channel, sender)
             if dd.ui == 0 then dd.ui = nil end
             ns.db.discovered[id] = dd
             AddDiscoveredInfo(id, dd)
-            ns.Print(who .. " found a new rare: " .. name .. (dd.z and (" in " .. dd.z) or "") .. ".")
             ns.ChangedSoon()
         elseif t > (dd.last or 0) then
             dd.last = t
@@ -1443,6 +1275,7 @@ local function OnAddonMessage(prefix, msg, channel, sender)
     elseif tag == "R" then
         if GetTime() - lastReply < 60 then return end
         lastReply = GetTime()
+        discoveriesDue = true
         SchedulePush()
     end
 end
@@ -1453,51 +1286,37 @@ end
 local HELP = {
     "/rwatch - open/close the window",
     "/rwatch box - show/hide the status box",
-    "/rwatch kill|tame|seen [minutesAgo] [layer] - log an event for Humar",
-    "/rwatch layer - show your current layer",
     "/rwatch sync - resync with other users now (normally automatic)",
     "/rwatch test - test the alert",
-    "/rwatch debug - show what RareWatch can detect on this client",
     "/rwatch swaps - layer moves used this hour (join requests stop at 8 of about 10)",
+    "/rwatch debug - show what RareWatch can detect on this client",
 }
+
+local function Size(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 
 SLASH_RAREWATCH1 = "/rwatch"
 SLASH_RAREWATCH2 = "/rarewatch"
 SlashCmdList.RAREWATCH = function(input)
-    local cmd, a, b = strsplit(" ", strtrim(input or ""))
+    local cmd = strsplit(" ", strtrim(input or ""))
     cmd = (cmd or ""):lower()
     if cmd == "" then
         ns.ToggleMain()
     elseif cmd == "box" then
         ns.opt.showTracker = not ns.opt.showTracker
         ns.Changed()
-    elseif cmd == "kill" or cmd == "tame" or cmd == "seen" then
-        local def = ns.Lookup(5828, "Humar the Pridelord") or ns.list[1]
-        if not def then ns.Print("No mobs tracked."); return end
-        local kind = (cmd == "kill" and "DOWN") or (cmd == "tame" and "TAME") or "SEEN"
-        local _, msg = ns.ManualLog(def, kind, a, b)
-        ns.Print(msg)
-    elseif cmd == "layer" then
-        ns.Print("Your layer: " .. (ns.currentLayer and ns.LayerName(ns.currentLayer) or "unknown - target any NPC first")
-            .. (ns.currentLayerZone and (" (detected in " .. ns.currentLayerZone .. ")") or ""))
     elseif cmd == "sync" then
         ns.SyncNow()
         ns.Print("Resyncing with other RareWatch users.")
-    elseif cmd == "debug" then
-        ns.Print("Combat log: " .. (ns.noCombatLog and "|cffff6060not available|r" or "registered")
-            .. ", events received: " .. (ns.cleuCount or 0) .. ", read errors: " .. (ns.cleuErrors or 0))
-        if ns.cleuLastError then ns.Print("Last combat log error: " .. ns.cleuLastError) end
-        ns.Print("Kills caught by seeing the dead mob: " .. (ns.deathFromUnit or 0))
-        ns.Print("Your map: " .. tostring(ns.PlayerMap()) .. ", layer here: " .. tostring(ns.currentLayer))
-        local n, h = ns.Digest()
-        local tracked, shadow = #ns.list, 0
-        for _ in pairs(ns.db.shadow) do shadow = shadow + 1 end
-        ns.Print(string.format("Sharing: %s, users online: %d, queue: %d, data: %d entries (%d tracked + %d other rares), digest %d",
-            ns.IsSharing() and "on" or "|cffff6060off|r", ns.OnlineUsers(), #queue, n, tracked, shadow, h))
     elseif cmd == "test" then
-        ns.Alert("TEST: Humar the Pridelord is UP")
+        ns.Alert("TEST: a rare is up!")
     elseif cmd == "swaps" then
         if ns.Join then ns.Join.PrintSwaps() end
+    elseif cmd == "debug" then
+        local n, h = ns.Digest()
+        ns.Print(string.format("Zone: %s (%d known rares), layer held: %s",
+            tostring(ns.Zone()), #ns.ZoneRares(), ns.currentLayer and ns.LayerShort(ns.currentLayer) or "no"))
+        ns.Print(string.format("Sharing: %s, users online: %d, queue: %d, kills shared: %d, tracked: %d, other rares with data: %d, digest %d",
+            ns.IsSharing() and "on" or "|cffff6060off|r", ns.OnlineUsers(), #queue, n, #ns.list, Size(ns.db.shadow), h))
     else
         for _, l in ipairs(HELP) do ns.Print(l) end
     end
@@ -1506,19 +1325,25 @@ end
 ---------------------------------------------------------------------------
 -- Housekeeping
 ---------------------------------------------------------------------------
--- Known rares on nameplates: a dead one means a kill we can log.
+-- Known rares on nameplates: a dead one means a kill we can log. A live one that stays in view is checked again
+-- once a minute, so it keeps counting as up for everyone (a sighting older than 10 minutes isn't "up" any more).
+local polledAt = {}
 function ns.PollNameplates()
+    local now = GetTime()
     for unit in pairs(ns.watched) do
         if not UnitExists(unit) then
-            ns.watched[unit] = nil
+            ns.watched[unit], polledAt[unit] = nil, nil
         elseif UnitIsDead(unit) then
             CheckUnit(unit)
-            ns.watched[unit] = nil
+            ns.watched[unit], polledAt[unit] = nil, nil
+        elseif now - (polledAt[unit] or now) >= 60 then
+            polledAt[unit] = now
+            CheckUnit(unit)
+        elseif not polledAt[unit] then
+            polledAt[unit] = now
         end
     end
 end
-
-local function Size(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
 
 -- Every ten minutes: drop expired records, and keep this session's memory of mobs seen from growing forever.
 function ns.Housekeeping()
@@ -1527,11 +1352,14 @@ function ns.Housekeeping()
     for _, def in pairs(ns.db.mobs) do ns.PruneDef(def, t) end
     for id, def in pairs(ns.db.shadow) do
         ns.PruneDef(def, t)
-        if next(def.layers) == nil and not def.samples then ns.db.shadow[id] = nil end
+        if next(def.layers) == nil then ns.db.shadow[id] = nil end
     end
     ns.BumpDigest()
-    if Size(alerted) > 500 then wipe(alerted) end
-    if Size(deadSeen) > 500 then wipe(deadSeen) end
+    for _, set in ipairs({ alerted, aliveSeen, deadSeen }) do
+        if Size(set) > 500 then wipe(set) end
+    end
+    for k, v in pairs(upActivity) do if t - v > 3600 then upActivity[k] = nil end end
+    for k, v in pairs(killSaid) do if t - v > 3600 then killSaid[k] = nil end end
     ns.Changed()
 end
 
@@ -1547,9 +1375,8 @@ end
 for _, e in ipairs({ "SHARD_TRANSFER", "ZONE_CHANGED_NEW_AREA", "PLAYER_LOGOUT" }) do
     pcall(ev.RegisterEvent, ev, e)   -- SHARD_TRANSFER is the game's own word for a layer move; not on every client
 end
--- Not registered: this client blocks addons from the combat log, and the attempt itself
--- triggers a "blocked from an action" warning. Kills are detected from dead units instead.
-ns.noCombatLog = true
+-- The combat log is not registered: this client blocks addons from it, and the attempt itself triggers a
+-- "blocked from an action" warning. Kills are detected from dead units instead.
 -- Health events only for the units we can act on. Listening to every unit's health fires hundreds of times a
 -- second in a busy area; nameplates are polled instead (see the ticker below).
 if not (ev.RegisterUnitEvent and pcall(ev.RegisterUnitEvent, ev, "UNIT_HEALTH", "target", "mouseover")) then
@@ -1564,33 +1391,27 @@ ev:SetScript("OnEvent", function(_, event, ...)
         ns.me = UnitName("player")
         local realm = GetNormalizedRealmName and GetNormalizedRealmName()
         ns.meFull = realm and (ns.me .. "-" .. realm) or ns.me
-        TAME_NAME = (C_Spell and C_Spell.GetSpellName and C_Spell.GetSpellName(1515))
-            or (GetSpellInfo and (GetSpellInfo(1515)))
-        lastPetName = UnitName("pet")
+        lastPetGUID = UnitGUID("pet")
         C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
         C_Timer.NewTicker(0.25, Pump)
-        C_Timer.NewTicker(5, CheckWindows)
         C_Timer.NewTicker(0.5, ns.PollNameplates)
         C_Timer.NewTicker(600, ns.Housekeeping)
         ns.BuildUI()
         ns.Print("v" .. ns.VERSION .. " loaded - /rwatch to open.")
     elseif event == "SHARD_TRANSFER" then
-        if ns.Private() then ns.LayerMoved() end
+        ns.LayerMoved()
     elseif event == "ZONE_CHANGED_NEW_AREA" then
-        if ns.Private() then ns.LayerBorder() end
+        ns.LayerBorder()
     elseif event == "PLAYER_LOGOUT" then
-        if ns.Private() then ns.LayerSave() end
+        ns.LayerSave()
     elseif event == "PLAYER_ENTERING_WORLD" then
-        if ns.Private() then
-            local isLogin, isReload = ...
-            ns.LayerWorldEntered(isLogin == true, isReload == true)
-        end
+        local isLogin, isReload = ...
+        ns.LayerWorldEntered(isLogin == true, isReload == true)
         if not entered then
             entered = true
             C_Timer.After(10, function()
-                if GetChannelName(CHANNEL) > 0 then
-                    ns.HideChannel()
-                    if ns.opt.channelConsent == nil then ns.opt.channelConsent = true end -- joined in an older version
+                if GetChannelName(CHANNEL) > 0 and ns.opt.channelConsent == nil then
+                    ns.opt.channelConsent = true    -- joined in an older version
                 end
                 SendHello()
                 SchedulePush()
@@ -1617,13 +1438,6 @@ ev:SetScript("OnEvent", function(_, event, ...)
         if unit and (unit:find("^party%d") or unit:find("^raid%d")) then CheckUnit(unit .. "target") end
     elseif event == "UNIT_PET" then
         if ... == "player" then OnPetChanged() end
-    elseif event == "COMBAT_LOG_EVENT_UNFILTERED" then
-        ns.cleuCount = (ns.cleuCount or 0) + 1
-        local ok, err = pcall(OnCombatLog)
-        if not ok then
-            ns.cleuErrors = (ns.cleuErrors or 0) + 1
-            ns.cleuLastError = tostring(err)
-        end
     elseif event == "NAME_PLATE_UNIT_REMOVED" then
         ns.watched[(...)] = nil
     elseif event == "UNIT_HEALTH" then

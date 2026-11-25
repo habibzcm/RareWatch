@@ -4,7 +4,6 @@ local W = {}
 ns.W = W
 
 local MEDIA = "Interface\\AddOns\\" .. ADDON_NAME .. "\\media\\"
-W.MEDIA = MEDIA
 
 ---------------------------------------------------------------------------
 -- Palette
@@ -40,7 +39,6 @@ local C = W.C
 function W.Hex(c)
     return string.format("|cff%02x%02x%02x", math.floor(c[1] * 255 + 0.5), math.floor(c[2] * 255 + 0.5), math.floor(c[3] * 255 + 0.5))
 end
-local Hex = W.Hex
 
 function W.Mix(a, b, t)
     return { a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t }
@@ -77,10 +75,9 @@ function W.Font(size, weight)
 end
 
 W.ICON = {
-    paw = 61433, clock = 60016, search = 60188, history = 60394, settings = 60192, x = 60245,
-    pin = 60136, plus = 60171, check = 59998, refresh = 60179, bell = 59957, crown = 60690,
-    sparkles = 63191, skull = 62098, target = 62746, eye = 60058, chevron = 60001, trash = 60225,
-    pencil = 60164, users = 60402, bolt = 59960, volume = 60241, info = 60101, hourglass = 61331,
+    paw = 61433, search = 60188, history = 60394, settings = 60192, x = 60245, pin = 60136, plus = 60171,
+    check = 59998, refresh = 60179, bell = 59957, sparkles = 63191, target = 62746, trash = 60225,
+    users = 60402, volume = 60241, info = 60101, hourglass = 61331,
 }
 
 local function U8(cp)
@@ -216,7 +213,6 @@ local STYLES = {
     danger  = { bg = { 0.250, 0.100, 0.110 }, hover = { 0.330, 0.130, 0.140 }, text = C.red },
     accent  = { bg = W.Mix(C.chip, C.accent, 0.22), hover = W.Mix(C.chip, C.accent, 0.32), text = C.accent },
 }
-W.STYLES = STYLES
 
 -- opts: text, icon, w, h, style, onClick, tip, iconSize, size
 function W.Button(parent, opts)
@@ -298,23 +294,6 @@ function W.ConfirmButton(parent, opts, onConfirm)
     return b
 end
 
--- Pill chip (static).
-function W.Chip(parent, text, textColor, bgColor)
-    local f = CreateFrame("Frame", nil, parent)
-    f:SetHeight(22)
-    f.bg = W.Round(f, bgColor or C.chip, 6)
-    f.text = W.Text(f, 11, "R", text, textColor or C.sec)
-    f.text:SetPoint("LEFT", 8, 0)
-    function f:SetText(t, c, bgc)
-        self.text:SetText(t or "")
-        if c then W.SetColor(self.text, c) end
-        if bgc then self.bg:SetColor(bgc) end
-        self:SetWidth(math.floor(self.text:GetStringWidth() + 16.5))
-    end
-    f:SetText(text)
-    return f
-end
-
 -- Toggle chip (filters).
 function W.ToggleChip(parent, text, get, set)
     local b = W.Button(parent, { text = text, h = 26, size = 11 })
@@ -378,14 +357,6 @@ function W.Edit(parent, w, h, placeholder)
     end)
     function e:SetPlaceholder(t) self.ph:SetText(t or "") end
     upd()
-    return e
-end
-
--- Caption above an input.
-function W.Field(parent, caption, w, placeholder)
-    local e = W.Edit(parent, w, 28, placeholder)
-    e.caption = W.Text(parent, 11, "R", caption, C.muted)
-    e.caption:SetPoint("BOTTOMLEFT", e, "TOPLEFT", 2, 5)
     return e
 end
 
